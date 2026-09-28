@@ -35,6 +35,7 @@ models/<model-id>/
       <workload-profile>/
         <deployment-mode>[--<suffix>]/
           recipe.yaml
+          config/
           manifests/
           guides/
           benchmarks/
@@ -80,15 +81,40 @@ same intent.
   topology, host requirements, and any RDMA/RoCE/DRA/SR-IOV configuration
   together.
 - `recipe.yaml` owns the workload-specific serving configuration, compatibility
-  claim, references to manifests/benchmark runs, and display-safe summary.
+  claim, component references, references to manifests/benchmark runs, and
+  display-safe summary.
+- `deployment.components` names each Deployment, LLMInferenceService,
+  LeaderWorkerSet, or llm-d router component. Each component has its own schema
+  and references a recipe-local source in `config/`. Container settings are
+  labelled by their actual pod role and container name within that component;
+  LWS can specify different leader and worker settings.
+- `deployment.auxiliary_sources` lists supporting `config/` manifests, such as
+  a Service or LLMInferenceServiceConfig, by path and Kubernetes kind.
+- `config/` contains the editable, manifest-specific source YAML or router
+  values. Start from a tested example. Structured container overrides in
+  `recipe.yaml` use ordered `command` and `args` string lists, an `env` list,
+  and optional per-container `resources.requests`/`resources.limits`. Keep
+  subcommands, positional values, and flags as exact tokens; do not classify
+  CLI options. Omit `command` to use the image entrypoint. Environment entries
+  use `name` with either `value` or `value_from`. A resource override changes
+  only the named resource keys; other values stay in the source manifest.
+  `arg_choices` may annotate selected flags with `flag`, optional `value`,
+  `required` (essential to this recipe), and `why`. These notes never replace
+  the exact argv. An imported manifest may leave `arg_choices` empty until its
+  rationale has been confirmed.
 - `manifests/` contains generated deployment artifacts. Do not hand-edit them;
-  change recipe inputs and run the renderer.
+  change recipe inputs in `recipe.yaml` or `config/` and run the renderer.
 - `benchmarks/` contains reproducible harness inputs, workload definitions, and
   trace references. `results/` contains sanitized raw run artifacts and their
   parser-generated normalized results.
 - `guides/` contains explanatory prose. It may embed generated tables, but it
   must link to the underlying recipe, manifest, and evidence rather than copy
-  mutable values.
+  mutable values. Optional `guides/notes.yaml` holds catalog presentation,
+  decision rationale, intentional omissions, image-choice status, feature
+  claims, quickstart steps, insights, known issues, and sizing pointers. Recipe
+  `notes` references it. Display specs point to source fields rather than copy
+  mutable values. A manifest import may leave rationale fields empty; do not
+  invent explanations or evidence.
 - `catalog/` is generated output and must not be hand-edited.
 
 ## Immutable hardware profiles

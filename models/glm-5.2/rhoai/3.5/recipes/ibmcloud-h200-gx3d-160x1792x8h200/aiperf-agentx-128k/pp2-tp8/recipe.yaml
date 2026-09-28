@@ -1,0 +1,34 @@
+schema_version: 3
+recipe_id: glm-5.2-rhoai-pp2-tp8
+model_id: glm-5.2
+platform: {stack: rhoai, version: "3.5"}
+hardware_profile: hardware-profiles/ibmcloud-h200-gx3d-160x1792x8h200.yaml
+workload_profile: aiperf-agentx-128k
+deployment_mode: pp2-tp8
+optimization_intent: long-context agentic serving
+maturity: day-zero
+deployment:
+  scope: multi-node
+  components:
+    modelserver:
+      kind: LLMInferenceService
+      source: config/llmisvc.yaml
+      template:
+        containers:
+          main:
+            arg_choices:
+              - flag: --kv-cache-dtype
+                value: fp8
+                required: true
+                why: Keeps KV-cache precision aligned with the intended long-context configuration.
+      worker:
+        containers:
+          main:
+            arg_choices:
+              - flag: --kv-cache-dtype
+                value: fp8
+                required: true
+                why: The worker uses the same KV-cache dtype as the leader.
+  auxiliary_sources:
+    - {path: config/pp-worker-llmisvcconfig.yaml, kind: LLMInferenceServiceConfig}
+notes: guides/notes.yaml

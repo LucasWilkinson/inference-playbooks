@@ -50,6 +50,7 @@ models/<model-id>/
     model-ops/
     recipes/<hardware-profile>/<workload-profile>/<deployment-mode>[--<suffix>]/
       recipe.yaml
+      config/
       manifests/
       guides/
       benchmarks/
@@ -68,6 +69,18 @@ models/<model-id>/
 - `deployment.scope` is always `single-node` or `multi-node`; `match.nodes` is
   retired. `optimization_intent` is catalog metadata, not a path level, and may
   be a custom concise label.
+- `deployment.components` uses separate schemas for Deployment,
+  LLMInferenceService, LeaderWorkerSet, and the llm-d router. Each component
+  references an editable source in `config/`; see
+  [component starting examples](schema/examples/README.md).
+- `deployment.auxiliary_sources` links supporting `config/` manifests such as
+  Services and operator configuration by path and kind.
+- Optional `notes: guides/notes.yaml` links reader-facing context and reasons
+  for deployment choices; see the [notes example](schema/examples/recipe-notes.yaml).
+- Complete day-zero examples cover
+  [Deployment](models/gemma-4/vllm/v0.24.0/recipes/nvidia-h200-x8/guidellm-8k1k/mtp-single-gpu/recipe.yaml),
+  [LLMInferenceService](models/glm-5.2/rhoai/3.5/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml),
+  and [LeaderWorkerSet](models/glm-5.2/vllm/v0.23.0/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml).
 
 Hardware profiles contain accelerator, host-topology, and applicable network
 facts together. They are stable but corrigible: a factual correction increments
@@ -76,7 +89,9 @@ or count requires a new profile, while `accelerator_key` supports comparisons
 across different hosts with the same accelerator type/count.
 
 See [the recipe-evidence guide](docs/recipe-evidence.md) for evidence and
-profile rules, and [AGENTS.md](AGENTS.md) for the full contributor contract.
+profile rules, [the recipe contribution guide](docs/contributing-recipes.md)
+for the creation and review flow, and [AGENTS.md](AGENTS.md) for the full
+contributor contract.
 
 ## Validation
 
@@ -100,8 +115,9 @@ renderer lands.
 - Recipe v3 schemas, immutable hardware profiles, evidence validation,
   affected-recipe selection, and reusable benchmark workloads are available on
   `main`.
-- Migration of existing playbooks, README rendering, and catalog generation are
-  follow-up work.
+- Three complete day-zero recipes demonstrate the Deployment, LLMI, and LWS
+  schema modes. They are not benchmark-validated; migration of the remaining
+  legacy playbooks, README rendering, and catalog generation are follow-up work.
 
 ## Planned
 

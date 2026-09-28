@@ -66,17 +66,37 @@
     "maturity": {"enum": ["day-zero", "validated", "production"]},
     "deployment": {
       "type": "object",
-      "required": ["scope"],
+      "required": ["scope", "components"],
       "properties": {
         "scope": {"enum": ["single-node", "multi-node"]},
         "status": {"$ref": "#/$defs/status"},
-        "parallelism": {
+        "components": {
           "type": "object",
-          "properties": {
-            "tensor": {"type": "integer", "minimum": 1},
-            "pipeline": {"type": "integer", "minimum": 1},
-            "data": {"type": "integer", "minimum": 1}
-          }
+          "description": "Named deployment components, each validated by its manifest-specific schema.",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9-]*$"},
+          "additionalProperties": {
+            "oneOf": [
+              {"$ref": "deployment.schema.json"},
+              {"$ref": "llmisvc.schema.json"},
+              {"$ref": "leaderworkerset.schema.json"},
+              {"$ref": "llmd-router.schema.json"}
+            ]
+          },
+          "minProperties": 1
+        },
+        "auxiliary_sources": {
+          "type": "array",
+          "description": "Additional editable manifests needed by the deployment, such as Services or operator configuration.",
+          "items": {
+            "type": "object",
+            "required": ["path", "kind"],
+            "properties": {
+              "path": {"type": "string", "pattern": "^config/.*\\.ya?ml$"},
+              "kind": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": false
+          },
+          "minItems": 1
         },
         "manifests": {
           "type": "array",
@@ -90,12 +110,15 @@
             }
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "benchmark_runs": {
       "type": "array",
+      "minItems": 1,
       "items": {"type": "string", "pattern": "^results/.+/run\\.yaml$"}
     },
+    "notes": {"type": "string", "pattern": "^guides/.*\\.ya?ml$"},
     "match": {
       "type": "object",
       "not": {"required": ["nodes"]},

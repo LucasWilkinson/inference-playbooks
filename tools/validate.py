@@ -10,12 +10,14 @@ from pathlib import Path
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from recipe_evidence import check_hardware_profiles, load_unique_yaml
 
 
 SCHEMAS = {
     "recipe": "recipe.schema.json",
+    "recipe-notes": "recipe-notes.schema.json",
     "model": "model.schema.json",
     "hardware-profile": "hardware-profile.schema.json",
     "benchmark-run": "benchmark-run.schema.json",
@@ -36,9 +38,19 @@ def load_schema(repo: Path, name: str) -> dict:
     return json.loads((repo / "schema" / SCHEMAS[name]).read_text())
 
 
-def validate_document(path: Path, value: dict, schema: dict) -> list[str]:
+def load_schema_registry(repo: Path) -> Registry:
+    """Register repository schemas locally so external $refs never need network access."""
+    resources = []
+    for path in sorted((repo / "schema").glob("*.schema.json")):
+        schema = json.loads(path.read_text())
+        Draft202012Validator.check_schema(schema)
+        resources.append((schema["$id"], Resource.from_contents(schema)))
+    return Registry().with_resources(resources)
+
+
+def validate_document(path: Path, value: dict, schema: dict, registry: Registry | None = None) -> list[str]:
     """Return JSON Schema validation errors for one document."""
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker(), registry=registry or Registry())
     return [
         f"{path}: {error.json_path or '$'}: {error.message}"
         for error in sorted(validator.iter_errors(value), key=lambda error: str(error.json_path))
@@ -55,6 +67,129 @@ def contained_path(root: Path, relative_path: object) -> Path | None:
     except ValueError:
         return None
     return candidate
+
+
+def nested_mapping(value: object, *keys: str) -> dict:
+    """Return a nested mapping, or an empty mapping when a path is absent."""
+    for key in keys:
+        if not isinstance(value, dict):
+            return {}
+        value = value.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def validate_component_containers(recipe_path: Path, name: str, component: dict, source: dict) -> list[str]:
+    """Check that each labelled override names a container in its source pod."""
+    kind = component["kind"]
+    if kind == "Deployment":
+        pod_paths = [(component, ("spec", "template", "spec"), "")]
+    elif kind == "LLMInferenceService":
+        pod_paths = [
+            (component.get("template", {}), ("spec", "template"), "template"),
+            (component.get("worker", {}), ("spec", "worker"), "worker"),
+        ]
+        prefill = component.get("prefill", {})
+        pod_paths.extend([
+            (prefill.get("template", {}), ("spec", "prefill", "template"), "prefill.template"),
+            (prefill.get("worker", {}), ("spec", "prefill", "worker"), "prefill.worker"),
+        ])
+    elif kind == "LeaderWorkerSet":
+        worker_path = ("spec", "leaderWorkerTemplate", "workerTemplate", "spec")
+        leader_path = ("spec", "leaderWorkerTemplate", "leaderTemplate", "spec")
+        if not nested_mapping(source, *leader_path):
+            leader_path = worker_path  # LWS uses workerTemplate for the leader by default.
+        pod_paths = [
+            (component.get("leader", {}), leader_path, "leader"),
+            (component.get("worker", {}), worker_path, "worker"),
+        ]
+    else:
+        return []
+    errors = []
+    for override, pod_path, role in pod_paths:
+        source_pod = nested_mapping(source, *pod_path)
+        for field, source_field in (("containers", "containers"), ("init_containers", "initContainers")):
+            for container_name in override.get(field, {}):
+                names = {
+                    container.get("name")
+                    for container in source_pod.get(source_field, [])
+                    if isinstance(container, dict)
+                }
+                if container_name not in names:
+                    location = f"{role}.{field}" if role else field
+                    errors.append(
+                        f"{recipe_path}: component {name} {location}.{container_name} "
+                        "is not in its source manifest"
+                    )
+    return errors
+
+
+def resolve_spec_source(repo: Path, recipe_path: Path, recipe: dict, reference: str) -> bool:
+    """Check a reader spec's file and JSON Pointer without copying its value."""
+    source_name, separator, pointer = reference.partition("#")
+    if not separator or not pointer.startswith("/"):
+        return False
+    if source_name == "recipe.yaml":
+        value = recipe
+    else:
+        if source_name == "hardware_profile":
+            source_path = contained_path(repo, recipe.get("hardware_profile"))
+        elif source_name == "model.yaml":
+            source_path = repo / "models" / recipe.get("model_id", "") / "model.yaml"
+        elif source_name.startswith("config/"):
+            source_path = contained_path(recipe_path.parent, source_name)
+            if source_path and not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
+                return False
+        else:
+            return False
+        if not source_path or not source_path.is_file():
+            return False
+        try:
+            value = load_yaml(source_path)
+        except (OSError, ValueError, yaml.YAMLError):
+            return False
+    for raw_part in pointer[1:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            return False
+    return True
+
+
+def validate_recipe_notes(repo: Path, recipe_path: Path, recipe: dict, schema: dict, registry: Registry) -> list[str]:
+    """Validate the optional reader notes and their local references."""
+    reference = recipe.get("notes")
+    if reference is None:
+        return []
+    notes_path = contained_path(recipe_path.parent, reference)
+    if not notes_path or not notes_path.is_relative_to((recipe_path.parent / "guides").resolve()):
+        return [f"{recipe_path}: notes path escapes guides/: {reference}"]
+    if not notes_path.is_file():
+        return [f"{recipe_path}: notes file does not exist: {reference}"]
+    try:
+        notes = load_yaml(notes_path)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        return [f"{recipe_path}: cannot load notes: {error}"]
+    errors = validate_document(notes_path, notes, schema, registry)
+    if errors:
+        return errors
+    for spec in notes.get("profile", {}).get("specs", []):
+        if not resolve_spec_source(repo, recipe_path, recipe, spec["source"]):
+            errors.append(f"{notes_path}: spec source does not resolve: {spec['source']}")
+    for decision in notes.get("decisions", []):
+        for evidence in decision.get("evidence", []):
+            evidence_path = contained_path(recipe_path.parent, evidence)
+            if not evidence_path or not evidence_path.is_relative_to((recipe_path.parent / "results").resolve()) or not evidence_path.is_file():
+                errors.append(f"{notes_path}: decision evidence does not exist: {evidence}")
+    components = recipe.get("deployment", {}).get("components", {})
+    for image_choice in notes.get("image_choices", []):
+        if image_choice["component"] not in components:
+            errors.append(f"{notes_path}: image choice component does not exist: {image_choice['component']}")
+        if recipe.get("maturity") in {"validated", "production"} and image_choice["status"]["state"] == "needs-verification":
+            errors.append(f"{notes_path}: validated recipe cannot recommend an unverified image")
+    return errors
 
 
 def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_path: dict[Path, dict]) -> list[str]:
@@ -106,6 +241,8 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
         else:
             errors.append(f"{recipe_path}: benchmark run was not indexed: {run_reference}")
     deployment = recipe.get("deployment", {})
+    if recipe.get("maturity") in {"validated", "production"} and deployment.get("status", {}).get("state") == "needs-verification":
+        errors.append(f"{recipe_path}: validated recipe cannot have an unverified deployment")
     manifests = deployment.get("manifests", []) if isinstance(deployment, dict) else []
     if not isinstance(manifests, list):
         manifests = []
@@ -116,6 +253,43 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
             continue
         if not manifest_path.is_file():
             errors.append(f"{recipe_path}: manifest does not exist: {manifest.get('path')}")
+    components = deployment.get("components", {}) if isinstance(deployment, dict) else {}
+    if not isinstance(components, dict):
+        components = {}
+    for name, component in components.items():
+        source_ref = component.get("values") if component.get("kind") == "llmd-router" else component.get("source")
+        source_path = contained_path(recipe_path.parent, source_ref)
+        if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
+            errors.append(f"{recipe_path}: component {name} source escapes config/: {source_ref}")
+            continue
+        if not source_path.is_file():
+            errors.append(f"{recipe_path}: component {name} source does not exist: {source_ref}")
+            continue
+        try:
+            source = load_yaml(source_path)
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            errors.append(f"{recipe_path}: cannot load component {name} source: {error}")
+            continue
+        if component.get("kind") != "llmd-router" and source.get("kind") != component.get("kind"):
+            errors.append(f"{recipe_path}: component {name} source kind must be {component.get('kind')}")
+        elif component.get("kind") != "llmd-router":
+            errors.extend(validate_component_containers(recipe_path, name, component, source))
+    for auxiliary in deployment.get("auxiliary_sources", []):
+        source_ref = auxiliary["path"]
+        source_path = contained_path(recipe_path.parent, source_ref)
+        if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
+            errors.append(f"{recipe_path}: auxiliary source escapes config/: {source_ref}")
+            continue
+        if not source_path.is_file():
+            errors.append(f"{recipe_path}: auxiliary source does not exist: {source_ref}")
+            continue
+        try:
+            source = load_yaml(source_path)
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            errors.append(f"{recipe_path}: cannot load auxiliary source {source_ref}: {error}")
+            continue
+        if source.get("kind") != auxiliary["kind"]:
+            errors.append(f"{recipe_path}: auxiliary source {source_ref} kind must be {auxiliary['kind']}")
     return errors
 
 
@@ -156,6 +330,7 @@ def main() -> int:
     repo = arguments.repo.resolve()
     errors = []
     schemas = {name: load_schema(repo, name) for name in SCHEMAS}
+    registry = load_schema_registry(repo)
 
     if not arguments.current:
         base = arguments.base or "HEAD"
@@ -170,14 +345,14 @@ def main() -> int:
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{path}: cannot load YAML: {error}")
             continue
-        errors.extend(validate_document(path, profile, schemas["hardware-profile"]))
+        errors.extend(validate_document(path, profile, schemas["hardware-profile"], registry))
     for path in sorted(repo.glob("models/**/model.yaml")):
         try:
             model = load_yaml(path)
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{path}: cannot load YAML: {error}")
             continue
-        errors.extend(validate_document(path, model, schemas["model"]))
+        errors.extend(validate_document(path, model, schemas["model"], registry))
     runs_by_id: dict[str, tuple[Path, dict]] = {}
     runs_by_path: dict[Path, dict] = {}
     expected_results: dict[Path, tuple[Path, dict]] = {}
@@ -187,7 +362,7 @@ def main() -> int:
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{path}: cannot load YAML: {error}")
             continue
-        document_errors = validate_document(path, run, schemas["benchmark-run"])
+        document_errors = validate_document(path, run, schemas["benchmark-run"], registry)
         errors.extend(document_errors)
         if document_errors:
             continue
@@ -211,18 +386,19 @@ def main() -> int:
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{path}: cannot load YAML: {error}")
             continue
-        document_errors = validate_document(path, recipe, schemas["recipe"])
+        document_errors = validate_document(path, recipe, schemas["recipe"], registry)
         errors.extend(document_errors)
         if document_errors:
             continue
         errors.extend(validate_recipe_layout(repo, path, recipe, runs_by_path))
+        errors.extend(validate_recipe_notes(repo, path, recipe, schemas["recipe-notes"], registry))
     for path in sorted(repo.glob("models/**/results/**/result.json")):
         try:
             result = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as error:
             errors.append(f"{path}: cannot load JSON: {error}")
             continue
-        document_errors = validate_document(path, result, schemas["benchmark-result"])
+        document_errors = validate_document(path, result, schemas["benchmark-result"], registry)
         errors.extend(document_errors)
         if document_errors:
             continue

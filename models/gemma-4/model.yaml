@@ -1,0 +1,9 @@
+schema_version: 1
+model_id: gemma-4
+name: Gemma 4 26B A4B Instruct
+family: Gemma 4
+huggingface_id: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
+access:
+  note: The serving manifest also requires access to the gated companion assistant model.
+quantizations:
+  - name: FP8 dynamic

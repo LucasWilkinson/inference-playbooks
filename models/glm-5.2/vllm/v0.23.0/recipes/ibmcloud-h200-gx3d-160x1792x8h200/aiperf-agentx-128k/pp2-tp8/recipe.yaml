@@ -1,0 +1,34 @@
+schema_version: 3
+recipe_id: glm-5.2-vllm-lws-pp2-tp8
+model_id: glm-5.2
+platform: {stack: vllm, version: v0.23.0}
+hardware_profile: hardware-profiles/ibmcloud-h200-gx3d-160x1792x8h200.yaml
+workload_profile: aiperf-agentx-128k
+deployment_mode: pp2-tp8
+optimization_intent: long-context agentic serving
+maturity: day-zero
+deployment:
+  scope: multi-node
+  components:
+    modelserver:
+      kind: LeaderWorkerSet
+      source: config/lws.yaml
+      leader:
+        containers:
+          vllm-leader:
+            arg_choices:
+              - flag: --node-rank
+                value: 0
+                required: true
+                why: The leader starts rank zero of the two-node pipeline.
+      worker:
+        containers:
+          vllm-worker:
+            arg_choices:
+              - flag: --node-rank
+                value: $(LWS_WORKER_INDEX)
+                required: true
+                why: The worker rank must come from the value injected by LWS.
+  auxiliary_sources:
+    - {path: config/service.yaml, kind: Service}
+notes: guides/notes.yaml

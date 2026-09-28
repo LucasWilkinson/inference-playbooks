@@ -1,0 +1,7 @@
+schema_version: 1
+model_id: glm-5.2
+name: GLM-5.2
+family: GLM
+huggingface_id: zai-org/GLM-5.2-FP8
+quantizations:
+  - name: FP8
