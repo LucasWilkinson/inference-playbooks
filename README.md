@@ -49,6 +49,7 @@ models/<model-id>/
   <stack>/<stack-version>/
     model-ops/
     recipes/<hardware-profile>/<workload-profile>/<deployment-mode>[--<suffix>]/
+      raw-manifest/   # initial-release intake, when used
       recipe.yaml
       config/
       manifests/
@@ -81,6 +82,9 @@ models/<model-id>/
   [Deployment](models/gemma-4/vllm/v0.24.0/recipes/nvidia-h200-x8/guidellm-8k1k/mtp-single-gpu/recipe.yaml),
   [LLMInferenceService](models/glm-5.2/rhoai/3.5/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml),
   and [LeaderWorkerSet](models/glm-5.2/vllm/v0.23.0/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml).
+- For the initial release, contributors may submit only raw YAML/JSON files
+  under a leaf's `raw-manifest/`. Thibrahi or Saketh will convert them in
+  the same PR before merge; see the [contribution guide](docs/contributing-recipes.md).
 
 Hardware profiles contain accelerator, host-topology, and applicable network
 facts together. They are stable but corrigible: a factual correction increments

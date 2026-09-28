@@ -14,6 +14,37 @@ and [LeaderWorkerSet](../models/glm-5.2/vllm/v0.23.0/recipes/ibmcloud-h200-gx3d-
 recipes. They include full source manifests and reader notes, but no benchmark
 runs or generated output yet.
 
+## Initial-release option: submit raw manifests
+
+For the initial release, a contributor may open a PR with only raw YAML/JSON
+inputs at the same recipe leaf, without authoring `recipe.yaml`:
+
+```text
+models/<model-id>/<stack>/<stack-version>/recipes/
+  <hardware-selector>/<workload-profile>/<deployment-mode>[--<suffix>]/
+    raw-manifest/
+      deployment.yaml
+```
+
+Multi-document Kubernetes YAML and Helm values are accepted. Put supporting
+YAML/JSON inputs in the same folder; an optional `README.md` may explain apply
+order or prerequisites. The PR description should state the model, stack and
+version, hardware, intended workload, deployment pattern, source/provenance,
+what has actually been tested, and any missing information. Do not include
+credentials, private prompts, model weights, or sensitive logs. A contributor
+does **not** need to create a model file, hardware profile, recipe notes,
+benchmark results, or generated manifests for this intake path.
+
+`python3 tools/validate.py --current` checks the folder layout and raw file
+syntax, including duplicate YAML keys, without requiring a recipe. The PR
+merge check intentionally remains red while `recipe.yaml` is absent. Thibrahi
+or Saketh will convert the files to `config/` and Recipe v3 **in that same PR**,
+fill in missing metadata with the contributor, and run the full checks. The
+raw files remain as the submitted snapshot; `config/` and `recipe.yaml` become
+authoritative after conversion. If there are no benchmark runs, the converted
+recipe is `day-zero`. This intake exception is temporary and ends after the
+initial release.
+
 ## 1. Choose the recipe identity
 
 Use this path:
@@ -113,6 +144,12 @@ python3 -m pip install -r tools/requirements.txt
 python3 tools/validate.py --current
 python3 -m unittest discover -s tests -p 'test_recipe_evidence.py'
 ```
+
+Maintainers also run
+`python3 tools/validate.py --current --require-converted-raw` before merge.
+CI runs the same conversion gate on
+PRs. A red conversion gate on a raw-only intake PR is expected until the
+maintainer adds its recipe.
 
 Before requesting review, inspect the complete source manifest and deploy or
 otherwise test it on the stated stack and hardware when claiming it works.

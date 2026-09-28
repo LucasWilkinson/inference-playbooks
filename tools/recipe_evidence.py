@@ -56,6 +56,11 @@ def load_unique_yaml(text: str) -> object:
     return yaml.load(text, Loader=UniqueKeyLoader)
 
 
+def load_unique_yaml_all(text: str) -> list[object]:
+    """Safely load a multi-document YAML stream with duplicate-key checks."""
+    return list(yaml.load_all(text, Loader=UniqueKeyLoader))
+
+
 def git_lines(repo: Path, arguments: list[str]) -> list[str]:
     """Run Git and return its non-empty stdout lines."""
     result = subprocess.run(

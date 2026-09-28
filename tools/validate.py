@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
-from recipe_evidence import check_hardware_profiles, load_unique_yaml
+from recipe_evidence import check_hardware_profiles, load_unique_yaml, load_unique_yaml_all
 
 
 SCHEMAS = {
@@ -76,6 +77,52 @@ def nested_mapping(value: object, *keys: str) -> dict:
             return {}
         value = value.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_converted: bool = False) -> list[str]:
+    """Check initial-release raw submissions without requiring a recipe yet."""
+    errors = []
+    properties = recipe_schema["properties"]
+    for directory in sorted(repo.glob("models/**/raw-manifest")):
+        if not directory.is_dir():
+            continue
+        parts = directory.relative_to(repo).parts
+        if (
+            len(parts) != 9 or parts[0] != "models" or parts[4] != "recipes"
+            or parts[8] != "raw-manifest"
+            or not re.fullmatch(properties["model_id"]["pattern"], parts[1])
+            or parts[2] not in properties["platform"]["properties"]["stack"]["enum"]
+            or not re.fullmatch(properties["platform"]["properties"]["version"]["pattern"], parts[3])
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]+", parts[5])
+            or parts[6] not in properties["workload_profile"]["enum"]
+            or not re.fullmatch(properties["deployment_mode"]["pattern"], parts[7])
+        ):
+            errors.append(f"{directory}: raw-manifest must be under a Recipe v3 leaf directory")
+            continue
+        if require_converted and not (directory.parent / "recipe.yaml").is_file():
+            errors.append(f"{directory}: maintainer conversion required before merge: recipe.yaml is missing")
+        manifest_count = 0
+        for path in sorted(directory.rglob("*")):
+            if path.is_dir():
+                continue
+            if not path.resolve().is_relative_to(repo.resolve()):
+                errors.append(f"{path}: raw-manifest file escapes the repository")
+                continue
+            if path.suffix.lower() not in {".yaml", ".yml", ".json"}:
+                if path.name != "README.md":
+                    errors.append(f"{path}: raw-manifest accepts YAML/JSON and optional README.md only")
+                continue
+            manifest_count += 1
+            try:
+                documents = [document for document in load_unique_yaml_all(path.read_text()) if document is not None]
+            except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+                errors.append(f"{path}: cannot parse raw manifest: {error}")
+                continue
+            if not documents or any(not isinstance(document, dict) for document in documents):
+                errors.append(f"{path}: raw manifest must contain at least one YAML object document")
+        if not manifest_count:
+            errors.append(f"{directory}: raw-manifest needs at least one YAML or JSON file")
+    return errors
 
 
 def validate_component_containers(recipe_path: Path, name: str, component: dict, source: dict) -> list[str]:
@@ -322,6 +369,7 @@ def main() -> int:
     parser.add_argument("--head")
     parser.add_argument("--cached", action="store_true")
     parser.add_argument("--current", action="store_true", help="validate current files without a profile-diff comparison")
+    parser.add_argument("--require-converted-raw", action="store_true", help="fail if a raw-manifest submission lacks recipe.yaml")
     arguments = parser.parse_args()
     if arguments.cached and arguments.current:
         parser.error("--cached and --current cannot be combined")
@@ -331,6 +379,7 @@ def main() -> int:
     errors = []
     schemas = {name: load_schema(repo, name) for name in SCHEMAS}
     registry = load_schema_registry(repo)
+    errors.extend(validate_raw_manifest_intake(repo, schemas["recipe"], arguments.require_converted_raw))
 
     if not arguments.current:
         base = arguments.base or "HEAD"

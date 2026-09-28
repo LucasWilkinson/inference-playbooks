@@ -372,6 +372,39 @@ correction_log:
         result = self.run_validator(directory, "--current")
         self.assertIn("auxiliary source does not exist", result.stderr)
 
+    def test_raw_only_leaf_accepts_multidoc_yaml_and_rejects_duplicates(self):
+        directory, profile, recipe_path = self.make_repo()
+        shutil.copytree(REPO / "schema", directory / "schema")
+        profile.write_text(self.profile_text.format(revision=1, correction="").replace(
+            "profile_id: h200-r1", "profile_id: h200-r1\nkind: hardware-profile"
+        ))
+        recipe_path.unlink()
+        raw = recipe_path.parent / "raw-manifest" / "deployment.yaml"
+        raw.parent.mkdir()
+        raw.write_text("kind: Deployment\nmetadata: {name: example}\n---\nkind: Service\nmetadata: {name: example}\n")
+        result = self.run_validator(directory, "--current")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_validator(directory, "--current", "--require-converted-raw")
+        self.assertIn("maintainer conversion required before merge", result.stderr)
+
+        raw.write_text("kind: Deployment\nkind: Service\n")
+        result = self.run_validator(directory, "--current")
+        self.assertIn("found duplicate key 'kind'", result.stderr)
+
+        raw.write_text("kind: Deployment\n")
+        recipe_path.write_text(yaml.safe_dump(self.sample_recipe()))
+        config = recipe_path.parent / "config"
+        config.mkdir()
+        (config / "modelserver.yaml").write_text("kind: Deployment\n")
+        result = self.run_validator(directory, "--current", "--require-converted-raw")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        wrong = recipe_path.parent.parent / "not-a-workload" / "tp8-aggregated" / "raw-manifest" / "deployment.yaml"
+        wrong.parent.mkdir(parents=True)
+        wrong.write_text("kind: Deployment\n")
+        result = self.run_validator(directory, "--current")
+        self.assertIn("raw-manifest must be under a Recipe v3 leaf directory", result.stderr)
+
     def test_validator_checks_reader_note_references(self):
         directory, profile, recipe_path = self.make_repo()
         shutil.copytree(REPO / "schema", directory / "schema")

@@ -34,6 +34,7 @@ models/<model-id>/
     recipes/<hardware-profile>/
       <workload-profile>/
         <deployment-mode>[--<suffix>]/
+          raw-manifest/   # initial-release intake, when used
           recipe.yaml
           config/
           manifests/
@@ -73,6 +74,16 @@ same intent.
 
 ## Ownership and source of truth
 
+For the initial release only, a contributor may open a PR containing raw YAML
+or JSON manifests under a leaf's `raw-manifest/` without creating
+`recipe.yaml`. The PR should identify the model, stack/version, hardware,
+workload, deployment pattern, and known prerequisites; uncertain details may
+be called out for review. Thibrahi or Saketh converts the submission in the
+same PR before merge. CI checks raw syntax and duplicate keys on submission,
+then requires a sibling `recipe.yaml` and full validation before merge. Do not
+require raw-only contributors to author notes, benchmark results, or generated
+files. This exception ends after the initial release.
+
 - `models/<model-id>/model.yaml` owns model identity and model-wide metadata:
   family, parameter count, Hugging Face identifier, license/access
   requirements, and available quantizations.
@@ -102,6 +113,9 @@ same intent.
   `required` (essential to this recipe), and `why`. These notes never replace
   the exact argv. An imported manifest may leave `arg_choices` empty until its
   rationale has been confirmed.
+- `raw-manifest/` preserves the initial submitted inputs for maintainer
+  conversion. It may contain multi-document YAML or JSON and an optional
+  README. After conversion, `config/` and `recipe.yaml` are authoritative.
 - `manifests/` contains generated deployment artifacts. Do not hand-edit them;
   change recipe inputs in `recipe.yaml` or `config/` and run the renderer.
 - `benchmarks/` contains reproducible harness inputs, workload definitions, and
@@ -175,6 +189,12 @@ and immutable checksum plus a durable external location.
 revisions, and required benchmark provenance. `tools/render.py` renders
 manifests, recipe READMEs, and catalog outputs. `tools/doctor.py` performs
 configuration linting.
+
+For raw intake, local `tools/validate.py --current` checks syntax and layout
+without requiring a recipe. CI uses `--require-converted-raw`, so a raw-only PR
+cannot merge until maintainer conversion and normal recipe validation pass.
+Raw-only leaves are not rendered; once `recipe.yaml` is added, normal
+affected-recipe selection applies.
 
 CI and pre-commit must run the same local commands. CI should calculate the
 affected recipe set from the diff:
