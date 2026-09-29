@@ -56,13 +56,17 @@ models/<model-id>/<stack>/<stack-version>/recipes/
 
 Choose `rhoai`, `llm-d`, or `vllm` for the stack. Use one of the current
 workloads: `guidellm-8k1k`, `aiperf-agentx-128k`, or
-`aiperf-agentx-unlimited-context`. Adding a new workload profile requires a
-schema change to `schema/recipe.schema.json`. The deployment mode names the pattern (for
-example, `tp8-aggregated` or `pp2-tp8`), not a latency/throughput category.
-Use a suffix only if another recipe already has that mode. Set
-`optimization_intent` separately; `latency`, `throughput`, and a concise custom
-description are allowed. Set `deployment.scope` to `single-node` or
-`multi-node`; do not use the retired `match.nodes` field.
+`aiperf-agentx-unlimited-context`. Adding a new workload profile requires
+a schema change to `schema/recipe.schema.json`.
+
+The deployment mode names the pattern (for example, `tp8-aggregated` or
+`pp2-tp8`), not a latency/throughput category. Use a suffix only if
+another recipe already has that mode.
+
+Set `optimization_intent` separately; `latency`, `throughput`, and a
+concise custom description are allowed. Set `deployment.scope` to
+`single-node` or `multi-node`; do not use the retired `match.nodes`
+field.
 
 The directory's hardware selector must match either the selected profile's
 file stem or its `accelerator_key`. The explicit `hardware_profile` path in
@@ -83,42 +87,49 @@ profile revision known when it ran.
 Place each editable source manifest in the recipe's `config/` directory.
 Use one labelled `deployment.components` entry per Deployment,
 LLMInferenceService, or LeaderWorkerSet; llm-d router entries point to a
-values file. The [component examples](../schema/examples/README.md) show the
-available shapes, including separate LWS leader and worker settings.
-List supporting Kubernetes manifests, such as an LWS Service or LLMI worker
-configuration, in `deployment.auxiliary_sources` with their path and kind.
+values file. The [component examples](../schema/examples/README.md) show
+the available shapes, including separate LWS leader and worker settings.
+List supporting Kubernetes manifests, such as an LWS Service or LLMI
+worker configuration, in `deployment.auxiliary_sources` with their path
+and kind.
 
 The source file retains the full deployment: image, replicas, probes,
-volumes, storage, networking, and other operator-specific fields. Container
-`command` and `args` in the recipe are **full-list replacements**, not
-individual flag patches. Omit an override to keep the source value; when
-supplying one, copy every required token in its original order and verify the
-result against the tested deployment. Container `env` entries and resource
-request/limit keys are labelled overrides. Do not infer a working deployment
-from a schema-valid fragment. This is especially important for LLMI
-`VLLM_ADDITIONAL_ARGS`, P/D role settings, and LWS startup/rank logic.
+volumes, storage, networking, and other operator-specific fields.
+Container `command` and `args` in the recipe are **full-list
+replacements**, not individual flag patches. Omit an override to keep
+the source value; when supplying one, copy every required token in its
+original order and verify the result against the tested deployment.
 
-Use optional `arg_choices` to explain selected flags. Each entry has `flag`,
-optional `value`, `required: true` or `false`, and `why`. Here `required`
-means essential to *this recipe's intended behavior*, not merely present in
-the command. Leave the list empty when importing a manifest without verified
-rationale; the exact source command/`args` remain authoritative.
+Container `env` entries and resource request/limit keys are labelled
+overrides. Do not infer a working deployment from a schema-valid
+fragment. This is especially important for LLMI `VLLM_ADDITIONAL_ARGS`,
+P/D role settings, and LWS startup/rank logic.
+
+Use optional `arg_choices` to explain selected flags. Each entry has
+`flag`, optional `value`, `required: true` or `false`, and `why`. Here
+`required` means essential to *this recipe's intended behavior*, not
+merely present in the command. Leave the list empty when importing a
+manifest without verified rationale; the exact source command/`args`
+remain authoritative.
 
 ## 4. Write `recipe.yaml` and optional reader notes
 
-Fill the fields required by [Recipe v3](../schema/recipe.schema.json): model,
-platform, profile, workload, deployment mode, intent, maturity, scope, and at
-least one component. The path identity must agree with those fields. Use
-`maturity: day-zero` if no benchmark run is available; `validated` and
-`production` require a nonempty `benchmark_runs` list and cannot recommend an
-image or deployment marked `needs-verification`.
+Fill the fields required by [Recipe v3](../schema/recipe.schema.json):
+model, platform, profile, workload, deployment mode, intent, maturity,
+scope, and at least one component. The path identity must agree with
+those fields.
+
+Use `maturity: day-zero` if no benchmark run is available; `validated`
+and `production` require a nonempty `benchmark_runs` list and cannot
+recommend an image or deployment marked `needs-verification`.
 
 For explanations, add `notes: guides/notes.yaml` and use the
-[reader-notes example](../schema/examples/recipe-notes.yaml). Notes can cover
-the headline, linked display specs, decisions across settings, omitted
-options, image compatibility, feature claims, quickstart, insights, known
-issues, and sizing. A display spec points to a source field with a JSON
-Pointer rather than copying a mutable value. Mark unverified claims honestly.
+[reader-notes example](../schema/examples/recipe-notes.yaml). Notes can
+cover the headline, linked display specs, decisions across settings,
+omitted options, image compatibility, feature claims, quickstart,
+insights, known issues, and sizing. A display spec points to a source
+field with a JSON Pointer rather than copying a mutable value. Mark
+unverified claims honestly.
 
 ## 5. Add benchmark evidence when available
 
@@ -148,22 +159,24 @@ python3 -m unittest discover -s tests -p 'test_recipe_evidence.py'
 ```
 
 Maintainers also run
-`python3 tools/validate.py --current --require-converted-raw` before merge.
-CI runs the same conversion gate on
-PRs. A red conversion gate on a raw-only intake PR is expected until the
-maintainer adds its recipe.
+`python3 tools/validate.py --current --require-converted-raw` before
+merge. CI runs the same conversion gate on PRs. A red conversion gate
+on a raw-only intake PR is expected until the maintainer adds its
+recipe.
 
-Before requesting review, inspect the complete source manifest and deploy or
-otherwise test it on the stated stack and hardware when claiming it works.
-The local command checks schemas, paths, source kinds, labelled container
-names, notes references, and evidence links; CI additionally checks
-hardware-profile corrections against the PR base. Validation does **not**
-prove that a manifest deploys, that feature claims follow from flags, or that
-benchmark metrics were parsed correctly.
+Before requesting review, inspect the complete source manifest and
+deploy or otherwise test it on the stated stack and hardware when
+claiming it works. The local command checks schemas, paths, source
+kinds, labelled container names, notes references, and evidence links;
+CI additionally checks hardware-profile corrections against the PR
+base. Validation does **not** prove that a manifest deploys, that
+feature claims follow from flags, or that benchmark metrics were parsed
+correctly.
 
-Open a pull request; do not push directly to `main`. CI validates the repository
-and computes the affected recipe set. A recipe-local edit selects that recipe;
-a corrected hardware profile selects only recipes that explicitly reference
-it; schema/tool/workflow changes select all recipes. The current CI render
-job is a placeholder: `tools/render.py`, generated manifest/README drift
-checks, and catalog generation are follow-up work, not merge gates today.
+Open a pull request; do not push directly to `main`. CI validates the
+repository and computes the affected recipe set. A recipe-local edit
+selects that recipe; a corrected hardware profile selects only recipes
+that explicitly reference it; schema/tool/workflow changes select all
+recipes. The current CI render job is a placeholder: `tools/render.py`,
+generated manifest/README drift checks, and catalog generation are
+follow-up work, not merge gates today.

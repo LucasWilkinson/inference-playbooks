@@ -9,12 +9,17 @@ the target Service, after making the required substitutions described below.
 Edit the `env` section in the manifest. The placeholder values are intentional:
 they prevent a benchmark from being accidentally directed at the wrong model.
 
-| Variable | Required change | Used by |
-|---|---|---|
-| `ENDPOINT` | Set to the target's in-cluster base URL, including its port; for example, `http://my-model:8000`. Do not add `/v1/...`. | Both Jobs |
-| `MODEL` | Set to the model identifier accepted by the endpoint. For vLLM, this is normally the `--served-model-name` value. | Both Jobs |
-| `TOKENIZER` | Set to the Hugging Face model ID or another tokenizer path that matches the served model. | Both Jobs |
-| `image` | The templates use `quay.io/rh-ee-thibrahi/aiperf:0.12.0`. Replace it only if the target cluster cannot pull it or requires a different AIPerf version. | AIPerf AgentX |
+| Variable     | Used by       | Required change                                       |
+| ------------ | ------------- | ----------------------------------------------------- |
+| `ENDPOINT`   | Both Jobs     | In-cluster base URL with port, e.g.                   |
+|              |               | `http://my-model:8000`. Do not add `/v1/...`.         |
+| `MODEL`      | Both Jobs     | Model identifier accepted by the endpoint. For vLLM,  |
+|              |               | normally the `--served-model-name` value.              |
+| `TOKENIZER`  | Both Jobs     | Hugging Face model ID or tokenizer path that matches   |
+|              |               | the served model.                                      |
+| `image`      | AIPerf AgentX | Templates use `quay.io/rh-ee-thibrahi/aiperf:0.12.0`. |
+|              |               | Replace only if the cluster cannot pull it or requires |
+|              |               | a different AIPerf version.                            |
 
 The target must be reachable from the Job namespace and expose OpenAI-compatible
 endpoints. For AgentX, it must support streaming chat completions and report
