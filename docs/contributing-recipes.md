@@ -56,7 +56,8 @@ models/<model-id>/<stack>/<stack-version>/recipes/
 
 Choose `rhoai`, `llm-d`, or `vllm` for the stack. Use one of the current
 workloads: `guidellm-8k1k`, `aiperf-agentx-128k`, or
-`aiperf-agentx-unlimited-context`. The deployment mode names the pattern (for
+`aiperf-agentx-unlimited-context`. Adding a new workload profile requires a
+schema change to `schema/recipe.schema.json`. The deployment mode names the pattern (for
 example, `tp8-aggregated` or `pp2-tp8`), not a latency/throughput category.
 Use a suffix only if another recipe already has that mode. Set
 `optimization_intent` separately; `latency`, `throughput`, and a concise custom
@@ -141,6 +142,7 @@ From the repository root:
 
 ```bash
 python3 -m pip install -r tools/requirements.txt
+pre-commit install          # runs hardware-profile validation on every commit
 python3 tools/validate.py --current
 python3 -m unittest discover -s tests -p 'test_recipe_evidence.py'
 ```

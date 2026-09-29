@@ -249,19 +249,22 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
     model_id, stack, version = parts[1:4]
     hardware_selector, workload, deployment_mode = parts[5:8]
     if recipe.get("model_id") != model_id:
-        errors.append(f"{recipe_path}: model_id must match its model directory")
+        errors.append(f"{recipe_path}: model_id '{recipe.get('model_id')}' must match its model directory '{model_id}'")
+    model_yaml = repo / "models" / model_id / "model.yaml"
+    if not model_yaml.is_file():
+        errors.append(f"{recipe_path}: models/{model_id}/model.yaml does not exist")
     platform = recipe.get("platform", {})
     if not isinstance(platform, dict):
         platform = {}
     if platform.get("stack") != stack or platform.get("version") != version:
-        errors.append(f"{recipe_path}: platform.stack/version must match its directory")
+        errors.append(f"{recipe_path}: platform.stack/version '{platform.get('stack')}/{platform.get('version')}' must match its directory '{stack}/{version}'")
     if recipe.get("workload_profile") != workload:
-        errors.append(f"{recipe_path}: workload_profile must match its directory")
+        errors.append(f"{recipe_path}: workload_profile '{recipe.get('workload_profile')}' must match its directory segment '{workload}'")
     if recipe.get("deployment_mode") != deployment_mode:
-        errors.append(f"{recipe_path}: deployment_mode must match its directory")
+        errors.append(f"{recipe_path}: deployment_mode '{recipe.get('deployment_mode')}' must match its directory segment '{deployment_mode}'")
     profile_path = contained_path(repo, recipe.get("hardware_profile"))
     if not profile_path or not profile_path.is_file():
-        errors.append(f"{recipe_path}: hardware_profile does not exist")
+        errors.append(f"{recipe_path}: hardware_profile does not exist: {recipe.get('hardware_profile')}")
     else:
         try:
             profile = load_yaml(profile_path)
@@ -429,6 +432,7 @@ def main() -> int:
                 errors.append(f"{path}: normalized result is already referenced by {expected_results[result_path][0]}")
             else:
                 expected_results[result_path] = (path, run)
+    recipe_ids: dict[str, Path] = {}
     for path in sorted(repo.glob("models/**/recipes/*/*/*/recipe.yaml")):
         try:
             recipe = load_yaml(path)
@@ -439,6 +443,12 @@ def main() -> int:
         errors.extend(document_errors)
         if document_errors:
             continue
+        rid = recipe.get("recipe_id")
+        if isinstance(rid, str):
+            if rid in recipe_ids:
+                errors.append(f"{path}: duplicate recipe_id '{rid}' also used by {recipe_ids[rid]}")
+            else:
+                recipe_ids[rid] = path
         errors.extend(validate_recipe_layout(repo, path, recipe, runs_by_path))
         errors.extend(validate_recipe_notes(repo, path, recipe, schemas["recipe-notes"], registry))
     for path in sorted(repo.glob("models/**/results/**/result.json")):

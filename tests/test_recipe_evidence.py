@@ -48,6 +48,9 @@ correction_log:
         profile = directory / "hardware-profiles" / "h200-r1.yaml"
         profile.parent.mkdir(parents=True)
         profile.write_text(self.profile_text.format(revision=1, correction=""))
+        model = directory / "models" / "glm" / "model.yaml"
+        model.parent.mkdir(parents=True)
+        model.write_text("schema_version: 1\nmodel_id: glm\nname: GLM\nfamily: GLM\nquantizations:\n  - name: FP8\n")
         recipe = directory / "models" / "glm" / "rhoai" / "3.5" / "recipes" / "h200-r1" / "guidellm-8k1k" / "tp8-aggregated" / "recipe.yaml"
         recipe.parent.mkdir(parents=True)
         recipe.write_text("recipe_id: guidellm-tp8\nhardware_profile: hardware-profiles/h200-r1.yaml\n")
