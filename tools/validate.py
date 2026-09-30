@@ -13,6 +13,7 @@ import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
+from constraints import load_constraints, validate_recipe_against_constraints
 from recipe_evidence import check_hardware_profiles, load_unique_yaml, load_unique_yaml_all
 
 
@@ -24,6 +25,13 @@ SCHEMAS = {
     "benchmark-run": "benchmark-run.schema.json",
     "benchmark-result": "benchmark-result.schema.json",
 }
+
+PARALLELISM_FLAGS = frozenset({
+    "--tensor-parallel-size",
+    "--pipeline-parallel-size",
+    "--data-parallel-size",
+    "--num-scheduler-steps",
+})
 
 
 def load_yaml(path: Path) -> dict:
@@ -150,7 +158,7 @@ def validate_component_containers(recipe_path: Path, name: str, component: dict,
         worker_path = ("spec", "leaderWorkerTemplate", "workerTemplate", "spec")
         leader_path = ("spec", "leaderWorkerTemplate", "leaderTemplate", "spec")
         if not nested_mapping(source, *leader_path):
-            leader_path = worker_path  # LWS uses workerTemplate for the leader by default.
+            leader_path = worker_path
         pod_paths = [
             (component.get("leader", {}), leader_path, "leader"),
             (component.get("worker", {}), worker_path, "worker"),
@@ -249,11 +257,95 @@ def validate_recipe_notes(repo: Path, recipe_path: Path, recipe: dict, schema: d
     return errors
 
 
+def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict) -> list[str]:
+    """Validate v4-specific serving block constraints beyond JSON Schema."""
+    errors: list[str] = []
+    serving = recipe.get("serving", {})
+    if not isinstance(serving, dict):
+        return errors
+
+    parallelism = serving.get("parallelism", {})
+    if isinstance(parallelism, dict):
+        mode = parallelism.get("mode")
+        pp = parallelism.get("pp", 1)
+        dp = parallelism.get("dp", 1)
+        tp = parallelism.get("tp", 1)
+        if mode == "tp" and (pp > 1 or dp > 1):
+            extra = []
+            if pp > 1:
+                extra.append(f"pp={pp}")
+            if dp > 1:
+                extra.append(f"dp={dp}")
+            errors.append(
+                f"{recipe_path}: parallelism mode 'tp' is incompatible with {', '.join(extra)}"
+            )
+        if mode == "pp" and (tp > 1 or dp > 1):
+            extra = []
+            if tp > 1:
+                extra.append(f"tp={tp}")
+            if dp > 1:
+                extra.append(f"dp={dp}")
+            errors.append(
+                f"{recipe_path}: parallelism mode 'pp' is incompatible with {', '.join(extra)}"
+            )
+        if mode == "dp" and (tp > 1 or pp > 1):
+            extra = []
+            if tp > 1:
+                extra.append(f"tp={tp}")
+            if pp > 1:
+                extra.append(f"pp={pp}")
+            errors.append(
+                f"{recipe_path}: parallelism mode 'dp' is incompatible with {', '.join(extra)}"
+            )
+        if mode == "tp+pp" and dp > 1:
+            errors.append(
+                f"{recipe_path}: parallelism mode 'tp+pp' is incompatible with dp={dp}"
+            )
+        if mode == "tp+dp" and pp > 1:
+            errors.append(
+                f"{recipe_path}: parallelism mode 'tp+dp' is incompatible with pp={pp}"
+            )
+
+    args = serving.get("args", [])
+    if isinstance(args, list):
+        seen_flags: set[str] = set()
+        for arg in args:
+            if not isinstance(arg, dict):
+                continue
+            flag = arg.get("flag")
+            if not isinstance(flag, str):
+                continue
+            if flag in PARALLELISM_FLAGS:
+                errors.append(
+                    f"{recipe_path}: serving.args must not contain parallelism flag {flag}; "
+                    "use serving.parallelism instead"
+                )
+            if flag in seen_flags:
+                errors.append(f"{recipe_path}: duplicate flag in serving.args: {flag}")
+            seen_flags.add(flag)
+
+    if serving.get("config_overrides") is True:
+        kustomization = recipe_path.parent / "config" / "kustomization.yaml"
+        if not kustomization.is_file():
+            errors.append(
+                f"{recipe_path}: config_overrides is true but config/kustomization.yaml does not exist"
+            )
+
+    router = serving.get("router", {})
+    if isinstance(router, dict) and router.get("values"):
+        values_path = contained_path(recipe_path.parent, router["values"])
+        if not values_path or not values_path.is_file():
+            errors.append(
+                f"{recipe_path}: serving.router.values file does not exist: {router['values']}"
+            )
+
+    return errors
+
+
 def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_path: dict[Path, dict]) -> list[str]:
     """Validate recipe layout, local references, and linked benchmark runs."""
     errors = []
     parts = recipe_path.relative_to(repo).parts
-    # models/<model>/<stack>/<version>/recipes/<hardware>/<workload>/<mode>/recipe.yaml
     if len(parts) != 9 or parts[0] != "models" or parts[4] != "recipes":
         return [f"{recipe_path}: does not follow the model/stack/version/recipes layout"]
     model_id, stack, version = parts[1:4]
@@ -313,43 +405,46 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
             continue
         if not manifest_path.is_file():
             errors.append(f"{recipe_path}: manifest does not exist: {manifest.get('path')}")
-    components = deployment.get("components", {}) if isinstance(deployment, dict) else {}
-    if not isinstance(components, dict):
-        components = {}
-    for name, component in components.items():
-        source_ref = component.get("values") if component.get("kind") == "llmd-router" else component.get("source")
-        source_path = contained_path(recipe_path.parent, source_ref)
-        if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
-            errors.append(f"{recipe_path}: component {name} source escapes config/: {source_ref}")
-            continue
-        if not source_path.is_file():
-            errors.append(f"{recipe_path}: component {name} source does not exist: {source_ref}")
-            continue
-        try:
-            source = load_yaml(source_path)
-        except (OSError, ValueError, yaml.YAMLError) as error:
-            errors.append(f"{recipe_path}: cannot load component {name} source: {error}")
-            continue
-        if component.get("kind") != "llmd-router" and source.get("kind") != component.get("kind"):
-            errors.append(f"{recipe_path}: component {name} source kind must be {component.get('kind')}")
-        elif component.get("kind") != "llmd-router":
-            errors.extend(validate_component_containers(recipe_path, name, component, source))
-    for auxiliary in deployment.get("auxiliary_sources", []):
-        source_ref = auxiliary["path"]
-        source_path = contained_path(recipe_path.parent, source_ref)
-        if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
-            errors.append(f"{recipe_path}: auxiliary source escapes config/: {source_ref}")
-            continue
-        if not source_path.is_file():
-            errors.append(f"{recipe_path}: auxiliary source does not exist: {source_ref}")
-            continue
-        try:
-            source = load_yaml(source_path)
-        except (OSError, ValueError, yaml.YAMLError) as error:
-            errors.append(f"{recipe_path}: cannot load auxiliary source {source_ref}: {error}")
-            continue
-        if source.get("kind") != auxiliary["kind"]:
-            errors.append(f"{recipe_path}: auxiliary source {source_ref} kind must be {auxiliary['kind']}")
+    # v3 component validation (v4 recipes use serving block instead)
+    schema_version = recipe.get("schema_version")
+    if schema_version != 4:
+        components = deployment.get("components", {}) if isinstance(deployment, dict) else {}
+        if not isinstance(components, dict):
+            components = {}
+        for name, component in components.items():
+            source_ref = component.get("values") if component.get("kind") == "llmd-router" else component.get("source")
+            source_path = contained_path(recipe_path.parent, source_ref)
+            if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
+                errors.append(f"{recipe_path}: component {name} source escapes config/: {source_ref}")
+                continue
+            if not source_path.is_file():
+                errors.append(f"{recipe_path}: component {name} source does not exist: {source_ref}")
+                continue
+            try:
+                source = load_yaml(source_path)
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                errors.append(f"{recipe_path}: cannot load component {name} source: {error}")
+                continue
+            if component.get("kind") != "llmd-router" and source.get("kind") != component.get("kind"):
+                errors.append(f"{recipe_path}: component {name} source kind must be {component.get('kind')}")
+            elif component.get("kind") != "llmd-router":
+                errors.extend(validate_component_containers(recipe_path, name, component, source))
+        for auxiliary in deployment.get("auxiliary_sources", []):
+            source_ref = auxiliary["path"]
+            source_path = contained_path(recipe_path.parent, source_ref)
+            if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
+                errors.append(f"{recipe_path}: auxiliary source escapes config/: {source_ref}")
+                continue
+            if not source_path.is_file():
+                errors.append(f"{recipe_path}: auxiliary source does not exist: {source_ref}")
+                continue
+            try:
+                source = load_yaml(source_path)
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                errors.append(f"{recipe_path}: cannot load auxiliary source {source_ref}: {error}")
+                continue
+            if source.get("kind") != auxiliary["kind"]:
+                errors.append(f"{recipe_path}: auxiliary source {source_ref} kind must be {auxiliary['kind']}")
     return errors
 
 
@@ -442,6 +537,22 @@ def main() -> int:
                 errors.append(f"{path}: normalized result is already referenced by {expected_results[result_path][0]}")
             else:
                 expected_results[result_path] = (path, run)
+    try:
+        flag_constraints = load_constraints(repo)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        errors.append(f"flag-constraints.yaml: {error}")
+        flag_constraints = None
+
+    models_by_id: dict[str, dict] = {}
+    for path in sorted(repo.glob("models/*/model.yaml")):
+        try:
+            model_data = load_yaml(path)
+        except (OSError, ValueError, yaml.YAMLError):
+            continue
+        mid = model_data.get("model_id")
+        if isinstance(mid, str):
+            models_by_id[mid] = model_data
+
     recipe_ids: dict[str, Path] = {}
     for path in sorted(repo.glob("models/**/recipes/*/*/*/recipe.yaml")):
         try:
@@ -459,8 +570,17 @@ def main() -> int:
                 errors.append(f"{path}: duplicate recipe_id '{rid}' also used by {recipe_ids[rid]}")
             else:
                 recipe_ids[rid] = path
+        schema_version = recipe.get("schema_version")
+        if schema_version == 4:
+            errors.extend(validate_v4_recipe(repo, path, recipe))
         errors.extend(validate_recipe_layout(repo, path, recipe, runs_by_path))
         errors.extend(validate_recipe_notes(repo, path, recipe, schemas["recipe-notes"], registry))
+        if flag_constraints is not None:
+            model_data = models_by_id.get(recipe.get("model_id", ""), {})
+            constraint_errors = validate_recipe_against_constraints(
+                flag_constraints, recipe, model_data
+            )
+            errors.extend(f"{path}: {e}" for e in constraint_errors)
     for path in sorted(repo.glob("models/**/results/**/result.json")):
         try:
             result = json.loads(path.read_text())

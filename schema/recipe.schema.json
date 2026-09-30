@@ -33,10 +33,117 @@
           "then": {"required": ["note"]}
         }
       ]
+    },
+    "serving": {
+      "type": "object",
+      "required": ["image", "model", "parallelism", "args"],
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Fully qualified container image reference"
+        },
+        "model": {
+          "type": "string",
+          "description": "HuggingFace model ID passed to vllm serve"
+        },
+        "parallelism": {
+          "type": "object",
+          "required": ["mode", "tp"],
+          "properties": {
+            "mode": {
+              "enum": ["tp", "pp", "tp+pp", "dp", "tp+dp"]
+            },
+            "tp": {"type": "integer", "minimum": 1},
+            "pp": {"type": "integer", "minimum": 1, "default": 1},
+            "dp": {"type": "integer", "minimum": 1, "default": 1}
+          },
+          "additionalProperties": false
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu": {"type": "string"},
+                "memory": {"type": "string"}
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu": {"type": "string"},
+                "memory": {"type": "string"}
+              }
+            }
+          }
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string"},
+              "value": {"type": "string"},
+              "value_from": {"type": "object"}
+            },
+            "oneOf": [
+              {"required": ["value"]},
+              {"required": ["value_from"]}
+            ]
+          }
+        },
+        "port": {
+          "type": "integer",
+          "default": 8000,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "router": {
+          "type": "object",
+          "properties": {
+            "strategy": {"type": "string"},
+            "values": {"type": "string", "pattern": "^config/.*\\.ya?ml$"}
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["flag", "required", "why"],
+            "properties": {
+              "flag": {"type": "string", "pattern": "^--[a-z][a-z0-9-]*$"},
+              "value": {"type": "string"},
+              "required": {"type": "boolean"},
+              "why": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": false
+          }
+        },
+        "constraint_overrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["flag", "allow", "reason"],
+            "properties": {
+              "flag": {"type": "string", "pattern": "^--[a-z][a-z0-9-]*$"},
+              "allow": {"const": true},
+              "reason": {"type": "string", "minLength": 1}
+            },
+            "additionalProperties": false
+          }
+        },
+        "config_overrides": {
+          "type": "boolean",
+          "description": "Set true when config/ contains Kustomize overlay patches"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "properties": {
-    "schema_version": {"const": 3},
+    "schema_version": {"enum": [3, 4]},
     "recipe_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
     "model_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
     "platform": {
@@ -64,9 +171,10 @@
       "description": "Catalog label. Use latency or throughput when applicable; custom text is allowed."
     },
     "maturity": {"enum": ["day-zero", "validated", "production"]},
+    "serving": {"$ref": "#/$defs/serving"},
     "deployment": {
       "type": "object",
-      "required": ["scope", "components"],
+      "required": ["scope"],
       "properties": {
         "scope": {"enum": ["single-node", "multi-node"]},
         "status": {"$ref": "#/$defs/status"},
@@ -123,6 +231,20 @@
       "type": "object",
       "not": {"required": ["nodes"]},
       "description": "Catalog selectors may not contain nodes; use deployment.scope."
+    }
+  },
+  "if": {
+    "required": ["schema_version"],
+    "properties": {"schema_version": {"const": 4}}
+  },
+  "then": {
+    "required": ["serving"]
+  },
+  "else": {
+    "properties": {
+      "deployment": {
+        "required": ["scope", "components"]
+      }
     }
   },
   "allOf": [

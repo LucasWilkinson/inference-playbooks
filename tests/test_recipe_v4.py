@@ -1,0 +1,478 @@
+"""Tests for Recipe v4 schema and validator support."""
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tools"))
+
+from validate import validate_v4_recipe  # noqa: E402
+
+
+def load_schema():
+    return json.loads((REPO / "schema" / "recipe.schema.json").read_text())
+
+
+def make_validator():
+    schemas = [json.loads(p.read_text()) for p in sorted((REPO / "schema").glob("*.schema.json"))]
+    registry = Registry().with_resources(
+        (s["$id"], Resource.from_contents(s)) for s in schemas
+    )
+    recipe_schema = next(s for s in schemas if s["$id"].endswith("/recipe.schema.json"))
+    return Draft202012Validator(recipe_schema, registry=registry)
+
+
+class RecipeV4SchemaTests(unittest.TestCase):
+    """Test JSON Schema validation for v3 backward compatibility and v4 serving block."""
+
+    def setUp(self):
+        self.schema = load_schema()
+        self.validator = make_validator()
+
+        self.v3_recipe = {
+            "schema_version": 3,
+            "recipe_id": "glm-guidellm-tp8",
+            "model_id": "glm",
+            "platform": {"stack": "rhoai", "version": "3.5"},
+            "hardware_profile": "hardware-profiles/h200-r1.yaml",
+            "workload_profile": "guidellm-8k1k",
+            "deployment_mode": "tp8-aggregated",
+            "optimization_intent": "latency",
+            "maturity": "day-zero",
+            "deployment": {
+                "scope": "single-node",
+                "components": {"modelserver": {"kind": "Deployment", "source": "config/modelserver.yaml"}},
+            },
+        }
+
+        self.v4_serving = {
+            "image": "vllm/vllm-openai:v0.24.0",
+            "model": "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic",
+            "parallelism": {"mode": "tp", "tp": 1},
+            "args": [
+                {
+                    "flag": "--enable-auto-tool-choice",
+                    "required": True,
+                    "why": "Enables tool calling.",
+                }
+            ],
+        }
+
+        self.v4_recipe = {
+            "schema_version": 4,
+            "recipe_id": "gemma-4-tp1-tool-calling",
+            "model_id": "gemma-4",
+            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "hardware_profile": "hardware-profiles/nvidia-h200-sxm-8x-nvlink-r1.yaml",
+            "workload_profile": "guidellm-8k1k",
+            "deployment_mode": "tp1-tool-calling",
+            "optimization_intent": "single-GPU agentic serving",
+            "maturity": "day-zero",
+            "deployment": {"scope": "single-node"},
+            "serving": self.v4_serving,
+        }
+
+    def errors_for(self, recipe):
+        return list(self.validator.iter_errors(recipe))
+
+    # --- Backward compatibility ---
+
+    def test_v3_recipe_still_validates(self):
+        errors = self.errors_for(self.v3_recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v3_recipe_with_custom_intent_validates(self):
+        recipe = {**self.v3_recipe, "optimization_intent": "lowest cost at 128K context"}
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v3_recipe_missing_scope_fails(self):
+        recipe = {**self.v3_recipe, "deployment": {}}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 basic validation ---
+
+    def test_v4_recipe_with_serving_validates(self):
+        errors = self.errors_for(self.v4_recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_recipe_missing_serving_fails(self):
+        recipe = {k: v for k, v in self.v4_recipe.items() if k != "serving"}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("serving" in e.message for e in errors),
+            f"Expected 'serving' in error messages: {[e.message for e in errors]}",
+        )
+
+    def test_v4_recipe_with_empty_serving_fails(self):
+        recipe = {**self.v4_recipe, "serving": {}}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 serving.env ---
+
+    def test_v4_recipe_with_env_value_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "env": [{"name": "VLLM_ENGINE_ITERATION_TIMEOUT_S", "value": "120"}],
+        }
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_recipe_with_env_value_from_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "env": [
+                {
+                    "name": "HF_TOKEN",
+                    "value_from": {
+                        "secretKeyRef": {"name": "hf-secret", "key": "token"}
+                    },
+                }
+            ],
+        }
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_recipe_env_without_value_or_value_from_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "env": [{"name": "MISSING_VALUE"}],
+        }
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 serving.parallelism schema ---
+
+    def test_v4_parallelism_unknown_mode_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "parallelism": {"mode": "unknown", "tp": 1},
+        }
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_parallelism_missing_tp_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "parallelism": {"mode": "tp"},
+        }
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 serving.args schema ---
+
+    def test_v4_args_invalid_flag_pattern_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "args": [{"flag": "no-dashes", "required": True, "why": "bad flag"}],
+        }
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_args_missing_why_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "args": [{"flag": "--some-flag", "required": True}],
+        }
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 serving.port ---
+
+    def test_v4_port_zero_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {**self.v4_serving, "port": 0}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_port_valid_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {**self.v4_serving, "port": 8080}
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    # --- v4 serving.constraint_overrides ---
+
+    def test_v4_constraint_override_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {
+            **self.v4_serving,
+            "constraint_overrides": [
+                {
+                    "flag": "--some-flag",
+                    "allow": True,
+                    "reason": "Needed for this workload.",
+                }
+            ],
+        }
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    # --- v4 serving.config_overrides ---
+
+    def test_v4_config_overrides_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {**self.v4_serving, "config_overrides": True}
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    # --- v4 additional properties disallowed ---
+
+    def test_v4_serving_extra_property_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["serving"] = {**self.v4_serving, "unknown_field": "value"}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- schema_version 5 fails ---
+
+    def test_unsupported_schema_version_fails(self):
+        recipe = {**self.v4_recipe, "schema_version": 5}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- Example file validates ---
+
+    def test_example_v4_file_validates(self):
+        import yaml
+
+        example = REPO / "schema" / "examples" / "recipe-v4-example.yaml"
+        with open(example) as fh:
+            recipe = yaml.safe_load(fh)
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+
+class RecipeV4ValidatorTests(unittest.TestCase):
+    """Test validate_v4_recipe() semantic checks that go beyond JSON Schema."""
+
+    def setUp(self):
+        self.base_serving = {
+            "image": "vllm/vllm-openai:v0.24.0",
+            "model": "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic",
+            "parallelism": {"mode": "tp", "tp": 1},
+            "args": [
+                {
+                    "flag": "--enable-auto-tool-choice",
+                    "required": True,
+                    "why": "Enables tool calling.",
+                }
+            ],
+        }
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.recipe_dir = (
+            self.tmpdir
+            / "models"
+            / "gemma-4"
+            / "vllm"
+            / "v0.24.0"
+            / "recipes"
+            / "h200"
+            / "guidellm-8k1k"
+            / "tp1-tool-calling"
+        )
+        self.recipe_dir.mkdir(parents=True)
+        self.recipe_path = self.recipe_dir / "recipe.yaml"
+
+    def make_recipe(self, serving_overrides=None):
+        serving = {**self.base_serving}
+        if serving_overrides:
+            serving.update(serving_overrides)
+        return {
+            "schema_version": 4,
+            "recipe_id": "gemma-4-tp1-tool-calling",
+            "model_id": "gemma-4",
+            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "hardware_profile": "hardware-profiles/h200.yaml",
+            "workload_profile": "guidellm-8k1k",
+            "deployment_mode": "tp1-tool-calling",
+            "optimization_intent": "latency",
+            "maturity": "day-zero",
+            "deployment": {"scope": "single-node"},
+            "serving": serving,
+        }
+
+    # --- Parallelism mode consistency ---
+
+    def test_tp_mode_with_pp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp", "tp": 4, "pp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("pp=2" in e for e in errors))
+
+    def test_tp_mode_with_dp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp", "tp": 4, "dp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("dp=2" in e for e in errors))
+
+    def test_pp_mode_with_tp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "pp", "tp": 2, "pp": 4}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("tp=2" in e for e in errors))
+
+    def test_dp_mode_with_pp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "dp", "tp": 1, "dp": 4, "pp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("pp=2" in e for e in errors))
+
+    def test_tp_pp_mode_with_dp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp+pp", "tp": 4, "pp": 2, "dp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("dp=2" in e for e in errors))
+
+    def test_tp_dp_mode_with_pp_greater_than_1_fails(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp+dp", "tp": 4, "pp": 2, "dp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("pp=2" in e for e in errors))
+
+    def test_valid_tp_mode_passes(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp", "tp": 8}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    def test_valid_tp_pp_mode_passes(self):
+        recipe = self.make_recipe(
+            {"parallelism": {"mode": "tp+pp", "tp": 4, "pp": 2}}
+        )
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    # --- Parallelism flags in serving.args ---
+
+    def test_tensor_parallel_size_in_args_fails(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--tensor-parallel-size", "value": "8", "required": True, "why": "TP size."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--tensor-parallel-size" in e for e in errors))
+
+    def test_pipeline_parallel_size_in_args_fails(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--pipeline-parallel-size", "value": "2", "required": True, "why": "PP."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--pipeline-parallel-size" in e for e in errors))
+
+    def test_data_parallel_size_in_args_fails(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--data-parallel-size", "value": "2", "required": True, "why": "DP."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--data-parallel-size" in e for e in errors))
+
+    def test_num_scheduler_steps_in_args_fails(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--num-scheduler-steps", "value": "4", "required": True, "why": "Chunked."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--num-scheduler-steps" in e for e in errors))
+
+    # --- Duplicate flags ---
+
+    def test_duplicate_flags_in_args_fails(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+                {"flag": "--max-model-len", "value": "8192", "required": True, "why": "Different."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("duplicate flag" in e for e in errors))
+
+    def test_no_duplicate_flags_passes(self):
+        recipe = self.make_recipe({
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+                {"flag": "--enable-auto-tool-choice", "required": True, "why": "Tool calling."},
+            ],
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    # --- config_overrides ---
+
+    def test_config_overrides_without_kustomization_fails(self):
+        recipe = self.make_recipe({"config_overrides": True})
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("kustomization.yaml" in e for e in errors))
+
+    def test_config_overrides_with_kustomization_passes(self):
+        config_dir = self.recipe_dir / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "kustomization.yaml").write_text("resources: []\n")
+        recipe = self.make_recipe({"config_overrides": True})
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    # --- router values ---
+
+    def test_router_values_missing_file_fails(self):
+        recipe = self.make_recipe({
+            "router": {"strategy": "prefix", "values": "config/router-values.yaml"},
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("router.values" in e for e in errors))
+
+    def test_router_values_existing_file_passes(self):
+        config_dir = self.recipe_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "router-values.yaml").write_text("key: val\n")
+        recipe = self.make_recipe({
+            "router": {"strategy": "prefix", "values": "config/router-values.yaml"},
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+
+if __name__ == "__main__":
+    unittest.main()
