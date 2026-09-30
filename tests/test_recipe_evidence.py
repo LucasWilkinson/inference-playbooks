@@ -402,6 +402,16 @@ correction_log:
         result = self.run_validator(directory, "--current", "--require-converted-raw")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+        raw_json = raw.parent / "values.json"
+        raw_json.write_text('{"kind": "ConfigMap", "metadata": {"name": "example"}}')
+        recipe_path.unlink()
+        result = self.run_validator(directory, "--current")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        raw_json.write_text("kind: ConfigMap\n")
+        result = self.run_validator(directory, "--current")
+        self.assertIn("cannot parse raw manifest", result.stderr)
+
         wrong = recipe_path.parent.parent / "not-a-workload" / "tp8-aggregated" / "raw-manifest" / "deployment.yaml"
         wrong.parent.mkdir(parents=True)
         wrong.write_text("kind: Deployment\n")

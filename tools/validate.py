@@ -114,8 +114,14 @@ def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_conver
                 continue
             manifest_count += 1
             try:
-                documents = [document for document in load_unique_yaml_all(path.read_text()) if document is not None]
-            except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+                text = path.read_text()
+                if path.suffix.lower() == ".json":
+                    documents = [json.loads(text)]
+                    if not isinstance(documents[0], dict):
+                        raise ValueError("JSON file must contain an object")
+                else:
+                    documents = [document for document in load_unique_yaml_all(text) if document is not None]
+            except (OSError, UnicodeError, ValueError, yaml.YAMLError, json.JSONDecodeError) as error:
                 errors.append(f"{path}: cannot parse raw manifest: {error}")
                 continue
             if not documents or any(not isinstance(document, dict) for document in documents):
