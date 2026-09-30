@@ -34,6 +34,37 @@
         }
       ]
     },
+    "exclude_entry": {
+      "type": "object",
+      "required": ["flag", "reason"],
+      "properties": {
+        "flag": {"type": "string", "pattern": "^--[a-z][a-z0-9-]*$"},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "role_block": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/serving/properties/args/items"}
+        },
+        "leader_args": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/serving/properties/args/items"}
+        },
+        "worker_args": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/serving/properties/args/items"}
+        },
+        "exclude": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/exclude_entry"}
+        }
+      },
+      "additionalProperties": false
+    },
     "serving": {
       "type": "object",
       "required": ["image", "model", "parallelism", "args"],
@@ -137,7 +168,9 @@
         "config_overrides": {
           "type": "boolean",
           "description": "Set true when config/ contains Kustomize overlay patches"
-        }
+        },
+        "decode": {"$ref": "#/$defs/role_block"},
+        "prefill": {"$ref": "#/$defs/role_block"}
       },
       "additionalProperties": false
     }
