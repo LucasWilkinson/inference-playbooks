@@ -225,6 +225,10 @@ def validate_recipe_notes(repo: Path, recipe_path: Path, recipe: dict, schema: d
         notes = load_yaml(notes_path)
     except (OSError, ValueError, yaml.YAMLError) as error:
         return [f"{recipe_path}: cannot load notes: {error}"]
+    if isinstance(notes.get("features"), list):
+        return [f"{notes_path}: features must be an object with known keys"
+                " (e.g. tool_calling, prefix_caching, reasoning_parser),"
+                " not a list; see schema/examples/recipe-notes.yaml"]
     errors = validate_document(notes_path, notes, schema, registry)
     if errors:
         return errors

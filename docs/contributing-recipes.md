@@ -70,7 +70,15 @@ field.
 
 The directory's hardware selector must match either the selected profile's
 file stem or its `accelerator_key`. The explicit `hardware_profile` path in
-`recipe.yaml` is the source of truth.
+`recipe.yaml` is the source of truth. For example, the profile file
+`hardware-profiles/nvidia-h200-sxm-8x-nvlink-r1.yaml` has
+`accelerator_key: nvidia-h200-x8`. A recipe directory may use either
+`nvidia-h200-sxm-8x-nvlink-r1` or `nvidia-h200-x8` as its hardware
+segment, but `recipe.yaml` must always reference the full file path:
+
+```yaml
+hardware_profile: hardware-profiles/nvidia-h200-sxm-8x-nvlink-r1.yaml
+```
 
 ## 2. Reuse or add model and hardware metadata
 

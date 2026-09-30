@@ -447,6 +447,12 @@ correction_log:
         self.assertIn("spec source does not resolve", result.stderr)
 
         notes["profile"]["specs"][0]["source"] = "recipe.yaml#/deployment/scope"
+        notes["features"] = [{"name": "Tool calling", "status": "claimed"}]
+        notes_path.write_text(yaml.safe_dump(notes))
+        result = self.run_validator(directory, "--current")
+        self.assertIn("features must be an object with known keys", result.stderr)
+        del notes["features"]
+
         notes["image_choices"] = [{
             "component": "modelserver", "container": "vllm", "ref": "docker.io/vllm/vllm-openai:v0.24.0",
             "status": {"state": "needs-verification", "note": "Run pending"}, "why": "Model support",
