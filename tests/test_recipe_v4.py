@@ -12,7 +12,7 @@ from referencing import Registry, Resource
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
 
-from validate import validate_v4_recipe  # noqa: E402
+from validate import resolve_role_args, validate_v4_recipe  # noqa: E402
 
 
 def load_schema():
@@ -472,6 +472,283 @@ class RecipeV4ValidatorTests(unittest.TestCase):
         })
         errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
         self.assertFalse(errors, errors)
+
+
+class RecipeV4RoleBlockTests(unittest.TestCase):
+    """Test role block (decode/prefill) validation and arg resolution."""
+
+    def setUp(self):
+        self.schema = load_schema()
+        self.validator = make_validator()
+
+        self.base_serving = {
+            "image": "vllm/vllm-openai:v0.24.0",
+            "model": "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic",
+            "parallelism": {"mode": "tp", "tp": 8},
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory limit."},
+                {"flag": "--enable-prefix-caching", "required": True, "why": "Prefix caching."},
+                {"flag": "--gpu-memory-utilization", "value": "0.95", "required": True, "why": "Max GPU use."},
+            ],
+        }
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.recipe_dir = (
+            self.tmpdir
+            / "models"
+            / "gemma-4"
+            / "vllm"
+            / "v0.24.0"
+            / "recipes"
+            / "h200"
+            / "guidellm-8k1k"
+            / "tp8-aggregated"
+        )
+        self.recipe_dir.mkdir(parents=True)
+        self.recipe_path = self.recipe_dir / "recipe.yaml"
+
+    def errors_for(self, recipe):
+        return list(self.validator.iter_errors(recipe))
+
+    def make_recipe(self, serving_overrides=None):
+        serving = {**self.base_serving}
+        if serving_overrides:
+            serving.update(serving_overrides)
+        return {
+            "schema_version": 4,
+            "recipe_id": "gemma-4-tp8-pd",
+            "model_id": "gemma-4",
+            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "hardware_profile": "hardware-profiles/h200.yaml",
+            "workload_profile": "guidellm-8k1k",
+            "deployment_mode": "tp8-aggregated",
+            "optimization_intent": "throughput",
+            "maturity": "day-zero",
+            "deployment": {"scope": "single-node"},
+            "serving": serving,
+        }
+
+    # --- Schema validation of role blocks ---
+
+    def test_decode_args_validates(self):
+        """Recipe with decode.args validates against JSON Schema."""
+        recipe = self.make_recipe({
+            "decode": {
+                "args": [
+                    {"flag": "--decode-only-flag", "required": True, "why": "Decode specific."},
+                ],
+            },
+        })
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_prefill_args_validates(self):
+        """Recipe with prefill.args validates against JSON Schema."""
+        recipe = self.make_recipe({
+            "router": {"strategy": "prefix"},
+            "prefill": {
+                "args": [
+                    {"flag": "--prefill-only-flag", "required": True, "why": "Prefill specific."},
+                ],
+            },
+        })
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    # --- Exclude validation ---
+
+    def test_exclude_valid_flag_validates(self):
+        """Exclude referencing an existing serving.args flag passes."""
+        recipe = self.make_recipe({
+            "decode": {
+                "exclude": [
+                    {"flag": "--enable-prefix-caching", "reason": "Not needed for decode role."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    def test_exclude_dead_flag_fails(self):
+        """Exclude referencing a flag not in serving.args produces an error."""
+        recipe = self.make_recipe({
+            "decode": {
+                "exclude": [
+                    {"flag": "--nonexistent-flag", "reason": "Does not exist."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--nonexistent-flag" in e and "does not exist" in e for e in errors))
+
+    # --- Flag overlap ---
+
+    def test_duplicate_flag_in_serving_and_role_args_fails(self):
+        """Same flag in serving.args and role.args without exclude is rejected."""
+        recipe = self.make_recipe({
+            "decode": {
+                "args": [
+                    {"flag": "--max-model-len", "value": "8192", "required": True, "why": "Override."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--max-model-len" in e and "without an exclude" in e for e in errors))
+
+    def test_exclude_then_readd_in_role_args_validates(self):
+        """Exclude a flag from universal and re-add it in role.args with different value."""
+        recipe = self.make_recipe({
+            "decode": {
+                "exclude": [
+                    {"flag": "--max-model-len", "reason": "Override with decode-specific value."},
+                ],
+                "args": [
+                    {"flag": "--max-model-len", "value": "8192", "required": True, "why": "Smaller for decode."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    # --- Leader/worker conflicts ---
+
+    def test_leader_worker_same_flag_fails(self):
+        """Same flag in both leader_args and worker_args for a role is rejected."""
+        recipe = self.make_recipe({
+            "decode": {
+                "leader_args": [
+                    {"flag": "--some-flag", "value": "leader-val", "required": True, "why": "Leader."},
+                ],
+                "worker_args": [
+                    {"flag": "--some-flag", "value": "worker-val", "required": True, "why": "Worker."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("--some-flag" in e and "leader_args" in e and "worker_args" in e for e in errors))
+
+    def test_duplicate_flag_in_role_args_fails(self):
+        """Duplicate flag within role.args is rejected."""
+        recipe = self.make_recipe({
+            "decode": {
+                "args": [
+                    {"flag": "--decode-flag", "required": True, "why": "First."},
+                    {"flag": "--decode-flag", "required": True, "why": "Duplicate."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("duplicate flag" in e and "--decode-flag" in e for e in errors))
+
+    # --- Prefill requires P/D mode ---
+
+    def test_prefill_without_pd_strategy_fails(self):
+        """Prefill block without a P/D router strategy produces an error."""
+        recipe = self.make_recipe({
+            "prefill": {
+                "args": [
+                    {"flag": "--prefill-flag", "required": True, "why": "Prefill."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(errors)
+        self.assertTrue(any("P/D router strategy" in e for e in errors))
+
+    def test_prefill_with_pd_strategy_validates(self):
+        """Prefill block with a valid P/D router strategy passes."""
+        recipe = self.make_recipe({
+            "router": {"strategy": "prefix"},
+            "prefill": {
+                "args": [
+                    {"flag": "--prefill-flag", "required": True, "why": "Prefill."},
+                ],
+            },
+        })
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
+    # --- resolve_role_args ---
+
+    def test_resolve_role_args_basic(self):
+        """Resolution without role blocks returns serving.args unchanged."""
+        serving = {
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+                {"flag": "--enable-prefix-caching", "required": True, "why": "Caching."},
+            ],
+        }
+        result = resolve_role_args(serving, "decode")
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["flag"], "--max-model-len")
+        self.assertEqual(result[1]["flag"], "--enable-prefix-caching")
+
+    def test_resolve_role_args_with_exclude(self):
+        """Excluded flag is removed from the resolved list."""
+        serving = {
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+                {"flag": "--enable-prefix-caching", "required": True, "why": "Caching."},
+            ],
+            "decode": {
+                "exclude": [
+                    {"flag": "--enable-prefix-caching", "reason": "Not for decode."},
+                ],
+            },
+        }
+        result = resolve_role_args(serving, "decode")
+        flags = [a["flag"] for a in result]
+        self.assertIn("--max-model-len", flags)
+        self.assertNotIn("--enable-prefix-caching", flags)
+        self.assertEqual(len(result), 1)
+
+    def test_resolve_role_args_with_role_args(self):
+        """Role-specific args are appended after universal args."""
+        serving = {
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+            ],
+            "decode": {
+                "args": [
+                    {"flag": "--decode-flag", "required": True, "why": "Decode only."},
+                ],
+            },
+        }
+        result = resolve_role_args(serving, "decode")
+        flags = [a["flag"] for a in result]
+        self.assertEqual(flags, ["--max-model-len", "--decode-flag"])
+
+    def test_resolve_role_args_leader_vs_worker(self):
+        """Leader and worker positions produce different resolved arg lists."""
+        serving = {
+            "args": [
+                {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
+            ],
+            "decode": {
+                "leader_args": [
+                    {"flag": "--leader-flag", "value": "true", "required": True, "why": "Leader only."},
+                ],
+                "worker_args": [
+                    {"flag": "--worker-flag", "value": "true", "required": True, "why": "Worker only."},
+                ],
+            },
+        }
+        leader_result = resolve_role_args(serving, "decode", "leader")
+        worker_result = resolve_role_args(serving, "decode", "worker")
+
+        leader_flags = [a["flag"] for a in leader_result]
+        worker_flags = [a["flag"] for a in worker_result]
+
+        self.assertIn("--max-model-len", leader_flags)
+        self.assertIn("--leader-flag", leader_flags)
+        self.assertNotIn("--worker-flag", leader_flags)
+
+        self.assertIn("--max-model-len", worker_flags)
+        self.assertIn("--worker-flag", worker_flags)
+        self.assertNotIn("--leader-flag", worker_flags)
 
 
 if __name__ == "__main__":

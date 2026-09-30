@@ -339,7 +339,144 @@ def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict) -> list[str]
                 f"{recipe_path}: serving.router.values file does not exist: {router['values']}"
             )
 
+    # --- Role block validation (Phase 3) ---
+    errors.extend(_validate_role_blocks(recipe_path, serving))
+
     return errors
+
+
+def _extract_flags(arg_list: list | None) -> list[str]:
+    """Extract flag strings from an arg list, skipping non-dict entries."""
+    if not isinstance(arg_list, list):
+        return []
+    return [
+        a["flag"] for a in arg_list
+        if isinstance(a, dict) and isinstance(a.get("flag"), str)
+    ]
+
+
+def _validate_role_blocks(recipe_path: Path, serving: dict) -> list[str]:
+    """Validate decode/prefill role blocks within a serving block."""
+    errors: list[str] = []
+    universal_flags = set(_extract_flags(serving.get("args")))
+
+    for role_name in ("decode", "prefill"):
+        role = serving.get(role_name)
+        if role is None:
+            continue
+        if not isinstance(role, dict):
+            continue
+
+        # Prefill requires P/D disaggregated mode
+        if role_name == "prefill":
+            router = serving.get("router", {})
+            is_pd = isinstance(router, dict) and router.get("strategy") in (
+                "prefix", "disaggregated", "prefill-decode",
+            )
+            if not is_pd:
+                errors.append(
+                    f"{recipe_path}: serving.prefill requires a P/D router strategy "
+                    "(prefix, disaggregated, or prefill-decode)"
+                )
+
+        # Validate exclude entries reference flags that exist in serving.args
+        exclude_flags: set[str] = set()
+        for entry in role.get("exclude", []):
+            if not isinstance(entry, dict):
+                continue
+            flag = entry.get("flag")
+            if not isinstance(flag, str):
+                continue
+            if flag not in universal_flags:
+                errors.append(
+                    f"{recipe_path}: serving.{role_name}.exclude references "
+                    f"flag {flag} which does not exist in serving.args"
+                )
+            exclude_flags.add(flag)
+
+        # Duplicate flags within role.args
+        role_args_flags: set[str] = set()
+        for flag in _extract_flags(role.get("args")):
+            if flag in role_args_flags:
+                errors.append(
+                    f"{recipe_path}: duplicate flag in serving.{role_name}.args: {flag}"
+                )
+            role_args_flags.add(flag)
+
+        # Same flag in both serving.args and role.args without exclude
+        for flag in role_args_flags:
+            if flag in universal_flags and flag not in exclude_flags:
+                errors.append(
+                    f"{recipe_path}: flag {flag} appears in both serving.args and "
+                    f"serving.{role_name}.args without an exclude entry"
+                )
+
+        # Duplicate flags within leader_args
+        leader_flags: set[str] = set()
+        for flag in _extract_flags(role.get("leader_args")):
+            if flag in leader_flags:
+                errors.append(
+                    f"{recipe_path}: duplicate flag in serving.{role_name}.leader_args: {flag}"
+                )
+            leader_flags.add(flag)
+
+        # Duplicate flags within worker_args
+        worker_flags: set[str] = set()
+        for flag in _extract_flags(role.get("worker_args")):
+            if flag in worker_flags:
+                errors.append(
+                    f"{recipe_path}: duplicate flag in serving.{role_name}.worker_args: {flag}"
+                )
+            worker_flags.add(flag)
+
+        # No flag can appear in both leader_args and worker_args
+        overlap = leader_flags & worker_flags
+        for flag in sorted(overlap):
+            errors.append(
+                f"{recipe_path}: flag {flag} appears in both "
+                f"serving.{role_name}.leader_args and serving.{role_name}.worker_args"
+            )
+
+    return errors
+
+
+def resolve_role_args(serving: dict, role_name: str, position: str = "leader") -> list[dict]:
+    """Resolve final arg list for a role+position.
+
+    1. Start with serving.args (universal)
+    2. Remove entries listed in role.exclude
+    3. Add role.args (role-specific)
+    4. Add role.leader_args or role.worker_args (position-specific)
+
+    Returns ordered list of {flag, value?, required, why} dicts.
+    """
+    # Step 1: start with universal args
+    universal = list(serving.get("args", []))
+
+    role = serving.get(role_name)
+    if not isinstance(role, dict):
+        return universal
+
+    # Step 2: remove excluded flags
+    exclude_flags = {
+        entry["flag"]
+        for entry in role.get("exclude", [])
+        if isinstance(entry, dict) and isinstance(entry.get("flag"), str)
+    }
+    result = [arg for arg in universal if arg.get("flag") not in exclude_flags]
+
+    # Step 3: add role-specific args
+    role_args = role.get("args", [])
+    if isinstance(role_args, list):
+        result.extend(role_args)
+
+    # Step 4: add position-specific args
+    position_key = f"{position}_args"
+    position_args = role.get(position_key, [])
+    if isinstance(position_args, list):
+        result.extend(position_args)
+
+    return result
 
 
 def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_path: dict[Path, dict]) -> list[str]:
