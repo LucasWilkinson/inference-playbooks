@@ -338,6 +338,24 @@ def render_recipe(
             continue
         stack = platform_entry.get("stack", "")
         version = platform_entry.get("version", "")
+
+        pinned_ref = platform_entry.get("pinned_manifest")
+        if pinned_ref:
+            pinned_path = recipe_path.parent / pinned_ref
+            if not pinned_path.is_file():
+                errors.append(f"{recipe_path}: pinned_manifest does not exist: {pinned_ref}")
+                continue
+            rendered = pinned_path.read_text()
+            if not dry_run:
+                stack_dir = f"{stack}-{version}" if version else stack
+                manifest_dir = recipe_path.parent / "manifests" / stack_dir
+                manifest_dir.mkdir(parents=True, exist_ok=True)
+                output_path = manifest_dir / pinned_path.name
+                output_path.write_text(rendered)
+                print(f"  wrote {output_path.relative_to(repo)} (pinned)")
+            all_rendered.append(rendered)
+            continue
+
         mode = serving.get("parallelism", {}).get("mode", "")
 
         effective_serving = serving

@@ -244,6 +244,40 @@ class RecipeV4SchemaTests(unittest.TestCase):
         errors = self.errors_for(recipe)
         self.assertFalse(errors, [e.message for e in errors])
 
+    # --- Pinned manifest ---
+
+    def test_v4_pinned_manifest_with_reason_validates(self):
+        recipe = {**self.v4_recipe}
+        recipe["platforms"] = [{
+            "stack": "llm-d", "version": "0.8",
+            "overrides": "platforms/llm-d-0.8.yaml",
+            "pinned_manifest": "manifests/llm-d-0.8/deployment.yaml",
+            "pinned_reason": "llm-d template WIP",
+        }]
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_pinned_manifest_without_reason_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["platforms"] = [{
+            "stack": "llm-d", "version": "0.8",
+            "overrides": "platforms/llm-d-0.8.yaml",
+            "pinned_manifest": "manifests/llm-d-0.8/deployment.yaml",
+        }]
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_pinned_manifest_bad_path_fails(self):
+        recipe = {**self.v4_recipe}
+        recipe["platforms"] = [{
+            "stack": "llm-d", "version": "0.8",
+            "overrides": "platforms/llm-d-0.8.yaml",
+            "pinned_manifest": "../../../etc/passwd",
+            "pinned_reason": "testing",
+        }]
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
     # --- v4 additional properties disallowed ---
 
     def test_v4_serving_extra_property_fails(self):

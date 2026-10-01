@@ -444,6 +444,62 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
         self.assertIn("kind: Deployment", rendered)
         self.assertNotIn("LLMInferenceService", rendered)
 
+    def test_render_pinned_manifest_copies_verbatim(self):
+        from render import render_recipe
+        recipe = make_recipe(tp=1)
+        pinned_content = "kind: CustomResource\napiVersion: v1\nmetadata:\n  name: pinned\n"
+        manifest_dir = self.recipe_dir / "manifests" / "llm-d-0.8"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "deployment.yaml").write_text(pinned_content)
+        recipe["platforms"] = [
+            {"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"},
+            {
+                "stack": "llm-d", "version": "0.8",
+                "overrides": "platforms/llm-d-0.8.yaml",
+                "pinned_manifest": "manifests/llm-d-0.8/deployment.yaml",
+                "pinned_reason": "llm-d template WIP",
+            },
+        ]
+        recipe_path = self._write_recipe(recipe)
+        rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=True)
+        self.assertFalse(errors, errors)
+        self.assertIn("kind: Deployment", rendered)
+        self.assertIn("kind: CustomResource", rendered)
+
+    def test_render_pinned_manifest_missing_file_errors(self):
+        from render import render_recipe
+        recipe = make_recipe(tp=1)
+        recipe["platforms"] = [{
+            "stack": "llm-d", "version": "0.8",
+            "overrides": "platforms/llm-d-0.8.yaml",
+            "pinned_manifest": "manifests/llm-d-0.8/deployment.yaml",
+            "pinned_reason": "llm-d template WIP",
+        }]
+        recipe_path = self._write_recipe(recipe)
+        rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=True)
+        self.assertTrue(errors)
+        self.assertTrue(any("pinned_manifest does not exist" in e for e in errors))
+
+    def test_render_pinned_manifest_writes_file(self):
+        from render import render_recipe
+        recipe = make_recipe(tp=1)
+        pinned_content = "kind: PinnedDeploy\napiVersion: v1\n"
+        manifest_dir = self.recipe_dir / "manifests" / "llm-d-0.8"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "custom.yaml").write_text(pinned_content)
+        recipe["platforms"] = [{
+            "stack": "llm-d", "version": "0.8",
+            "overrides": "platforms/llm-d-0.8.yaml",
+            "pinned_manifest": "manifests/llm-d-0.8/custom.yaml",
+            "pinned_reason": "llm-d template WIP",
+        }]
+        recipe_path = self._write_recipe(recipe)
+        rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=False)
+        self.assertFalse(errors, errors)
+        output_path = self.recipe_dir / "manifests" / "llm-d-0.8" / "custom.yaml"
+        self.assertTrue(output_path.is_file())
+        self.assertEqual(output_path.read_text(), pinned_content)
+
     def test_render_all_blocked_produces_no_output(self):
         from render import render_recipe
         recipe = make_recipe(tp=1)

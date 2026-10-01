@@ -391,6 +391,18 @@ def _validate_platform_overrides(repo: Path, recipe_path: Path, recipe: dict) ->
             version = entry.get("version", "?")
             reason = entry.get("reason", "no reason given")
             print(f"  info: {recipe_path}: platform {stack}-{version} blocked: {reason}")
+        pinned_ref = entry.get("pinned_manifest")
+        if isinstance(pinned_ref, str):
+            pinned_path = contained_path(recipe_path.parent, pinned_ref)
+            if not pinned_path:
+                errors.append(f"{recipe_path}: pinned_manifest escapes recipe directory: {pinned_ref}")
+            elif not pinned_path.is_file():
+                errors.append(f"{recipe_path}: pinned_manifest does not exist: {pinned_ref}")
+            else:
+                stack = entry.get("stack", "?")
+                version = entry.get("version", "?")
+                reason = entry.get("pinned_reason", "no reason given")
+                print(f"  info: {recipe_path}: platform {stack}-{version} pinned: {reason}")
         overrides_ref = entry.get("overrides")
         if not isinstance(overrides_ref, str):
             continue

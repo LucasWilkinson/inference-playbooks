@@ -254,11 +254,29 @@
           "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
           "overrides": {"type": "string", "pattern": "^platforms/[^/]+\\.ya?ml$"},
           "blocked": {"type": "boolean"},
-          "reason": {"type": "string", "minLength": 1}
+          "reason": {"type": "string", "minLength": 1},
+          "pinned_manifest": {
+            "type": "string",
+            "pattern": "^manifests/[^/]+/[^/]+\\.ya?ml$",
+            "description": "Path to a hand-authored manifest that the renderer copies verbatim instead of generating."
+          },
+          "pinned_reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this platform uses a pinned manifest instead of the renderer."
+          }
         },
         "additionalProperties": false,
-        "if": {"properties": {"blocked": {"const": true}}, "required": ["blocked"]},
-        "then": {"required": ["stack", "version", "overrides", "reason"]}
+        "allOf": [
+          {
+            "if": {"properties": {"blocked": {"const": true}}, "required": ["blocked"]},
+            "then": {"required": ["stack", "version", "overrides", "reason"]}
+          },
+          {
+            "if": {"required": ["pinned_manifest"]},
+            "then": {"required": ["pinned_reason"]}
+          }
+        ]
       }
     },
     "hardware_profile": {
