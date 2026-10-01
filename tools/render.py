@@ -29,7 +29,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = REPO_ROOT / "templates"
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
-from constraints import load_constraints, validate_recipe_against_constraints
+from constraints import (
+    _build_recipe_context,
+    evaluate_constraints,
+    load_constraints,
+    validate_recipe_against_constraints,
+)
 from recipe_evidence import load_unique_yaml
 from validate import resolve_role_args
 
@@ -81,15 +86,45 @@ def select_template(stack: str, mode: str) -> str:
     return TEMPLATE_MAP[key]
 
 
+
+def apply_constraint_flags(
+    args: list[dict],
+    removes: list[dict],
+    forces: list[dict],
+) -> list[dict]:
+    """Apply constraint removes and forces to an args list."""
+    remove_flags = {r["flag"] for r in removes}
+    result = [a for a in args if a.get("flag") not in remove_flags]
+    existing_flags = {a.get("flag") for a in result}
+    for force in forces:
+        flag = force["flag"]
+        if flag in existing_flags:
+            result = [
+                {**a, "value": force["value"]} if a.get("flag") == flag else a
+                for a in result
+            ]
+        else:
+            result.append({
+                "flag": flag,
+                "value": force["value"],
+                "required": True,
+                "why": "; ".join(force["reasons"]),
+            })
+    return result
+
+
 def build_template_context(
     recipe: dict,
     model: dict,
     constraints: dict | None,
+    platform: dict | None = None,
 ) -> dict:
     """Build template rendering context from recipe + model + constraints."""
     serving = recipe["serving"]
     parallelism = serving["parallelism"]
-    stack = recipe["platform"]["stack"]
+    if platform is None:
+        platform = recipe.get("platforms", [{}])[0]
+    stack = platform.get("stack", "")
     mode = parallelism["mode"]
 
     tp = parallelism.get("tp", 1)
@@ -118,7 +153,15 @@ def build_template_context(
         leader_args = args
         worker_args = args
 
-    replicas = dp if dp > 1 else 1
+    if constraints:
+        recipe_context = _build_recipe_context(recipe, model)
+        recipe_context["platform"] = {"stack": stack, "version": platform.get("version", "")}
+        removes, forces, _ = evaluate_constraints(constraints, recipe_context)
+        args = apply_constraint_flags(args, removes, forces)
+        leader_args = apply_constraint_flags(leader_args, removes, forces)
+        worker_args = apply_constraint_flags(worker_args, removes, forces)
+
+    replicas = 1
 
     return {
         "name": name,
@@ -127,7 +170,7 @@ def build_template_context(
         "tp": tp,
         "pp": pp,
         "dp": dp,
-        "gpu_count": tp,
+        "gpu_count": tp * dp,
         "replicas": replicas,
         "args": args,
         "leader_args": leader_args,
@@ -159,50 +202,49 @@ def render_template(template_path: str, context: dict) -> str:
 def run_kustomize(base_manifest: str, recipe_dir: Path) -> str:
     """Run kustomize build with config/ as overlay over generated base."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        base_dir = Path(tmpdir) / "base"
-        base_dir.mkdir()
-        base_file = base_dir / "manifest.yaml"
+        work_dir = Path(tmpdir)
+        base_file = work_dir / "base-manifest.yaml"
         base_file.write_text(base_manifest)
 
-        overlay_dir = Path(tmpdir) / "overlay"
-        overlay_dir.mkdir()
-
         config_dir = recipe_dir / "config"
+        resolved_config = config_dir.resolve()
         for item in config_dir.iterdir():
+            if not item.is_file():
+                continue
             if item.name == "kustomization.yaml":
                 kustomization = yaml.safe_load(item.read_text()) or {}
                 resources = kustomization.get("resources", [])
                 new_resources = []
                 for res in resources:
                     if "../manifests/" in res or res.startswith("../manifests"):
-                        new_resources.append(str(base_file))
+                        new_resources.append("base-manifest.yaml")
                     else:
-                        src = config_dir / res
+                        src = (config_dir / res).resolve()
+                        if not str(src).startswith(str(resolved_config)):
+                            raise ValueError(f"resource path escapes config/: {res}")
                         if src.is_file():
-                            dest = overlay_dir / res
-                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest = work_dir / src.name
                             shutil.copy2(src, dest)
-                            new_resources.append(res)
+                            new_resources.append(src.name)
                         else:
                             new_resources.append(res)
                 kustomization["resources"] = new_resources
                 if not new_resources:
-                    kustomization["resources"] = [str(base_file)]
-                (overlay_dir / "kustomization.yaml").write_text(
+                    kustomization["resources"] = ["base-manifest.yaml"]
+                (work_dir / "kustomization.yaml").write_text(
                     yaml.dump(kustomization, default_flow_style=False)
                 )
             else:
-                dest = overlay_dir / item.name
-                shutil.copy2(item, dest)
+                shutil.copy2(item, work_dir / item.name)
 
-        if not (overlay_dir / "kustomization.yaml").is_file():
-            kustomization = {"resources": [str(base_file)]}
-            (overlay_dir / "kustomization.yaml").write_text(
+        if not (work_dir / "kustomization.yaml").is_file():
+            kustomization = {"resources": ["base-manifest.yaml"]}
+            (work_dir / "kustomization.yaml").write_text(
                 yaml.dump(kustomization, default_flow_style=False)
             )
 
         result = subprocess.run(
-            ["kustomize", "build", str(overlay_dir)],
+            ["kustomize", "build", str(work_dir)],
             capture_output=True,
             text=True,
         )
@@ -213,12 +255,40 @@ def run_kustomize(base_manifest: str, recipe_dir: Path) -> str:
         return result.stdout
 
 
+def merge_overrides(serving: dict, overrides: dict) -> dict:
+    """Merge platform overrides into a copy of the serving block."""
+    merged = dict(serving)
+    if "image" in overrides:
+        merged["image"] = overrides["image"]
+    if "served_model_name" in overrides:
+        merged["served_model_name"] = overrides["served_model_name"]
+    if "resources" in overrides:
+        merged["resources"] = overrides["resources"]
+    if "router" in overrides:
+        merged["router"] = overrides["router"]
+    if "probes" in overrides:
+        base_probes = dict(merged.get("probes", {}))
+        base_probes.update(overrides["probes"])
+        merged["probes"] = base_probes
+    if "env" in overrides:
+        base_env = list(merged.get("env", []))
+        base_env.extend(overrides["env"])
+        merged["env"] = base_env
+    if "args" in overrides:
+        base_args = list(merged.get("args", []))
+        override_flags = {a["flag"] for a in overrides["args"] if isinstance(a, dict)}
+        base_args = [a for a in base_args if a.get("flag") not in override_flags]
+        base_args.extend(overrides["args"])
+        merged["args"] = base_args
+    return merged
+
+
 def render_recipe(
     repo: Path,
     recipe_path: Path,
     dry_run: bool = False,
 ) -> tuple[str, list[str]]:
-    """Render a single v4 recipe.
+    """Render a single v4 recipe for all platforms.
 
     Returns (rendered_yaml, errors).
     Errors are non-empty if rendering cannot proceed.
@@ -232,6 +302,11 @@ def render_recipe(
     serving = recipe.get("serving")
     if not isinstance(serving, dict):
         return "", [f"{recipe_path}: missing serving block"]
+
+    if serving.get("prefill"):
+        return "", [f"{recipe_path}: prefill/decode disaggregated serving not yet supported by renderer"]
+    if serving.get("router", {}).get("strategy"):
+        return "", [f"{recipe_path}: router configuration not yet supported by renderer"]
 
     model_path = repo / "models" / recipe.get("model_id", "") / "model.yaml"
     if model_path.is_file():
@@ -253,42 +328,71 @@ def render_recipe(
             errors.extend(f"{recipe_path}: {e}" for e in constraint_errors)
             return "", errors
 
-    stack = recipe.get("platform", {}).get("stack", "")
-    mode = serving.get("parallelism", {}).get("mode", "")
+    platforms = recipe.get("platforms", [])
+    if not isinstance(platforms, list) or not platforms:
+        return "", [f"{recipe_path}: no platforms defined"]
 
-    try:
-        template_path = select_template(stack, mode)
-    except ValueError as exc:
-        return "", [str(exc)]
+    all_rendered: list[str] = []
+    for platform_entry in platforms:
+        if platform_entry.get("blocked"):
+            continue
+        stack = platform_entry.get("stack", "")
+        version = platform_entry.get("version", "")
+        mode = serving.get("parallelism", {}).get("mode", "")
 
-    context = build_template_context(recipe, model, constraints)
-    rendered = render_template(template_path, context)
+        effective_serving = serving
+        overrides_ref = platform_entry.get("overrides")
+        if overrides_ref:
+            overrides_path = recipe_path.parent / overrides_ref
+            if overrides_path.is_file():
+                try:
+                    overrides = load_yaml_file(overrides_path)
+                    if overrides:
+                        effective_serving = merge_overrides(serving, overrides)
+                except (OSError, ValueError, yaml.YAMLError) as exc:
+                    errors.append(f"{recipe_path}: cannot load overrides {overrides_ref}: {exc}")
+                    continue
 
-    if serving.get("config_overrides") is True:
-        config_dir = recipe_path.parent / "config"
-        kustomization = config_dir / "kustomization.yaml"
-        if kustomization.is_file():
-            try:
-                rendered = run_kustomize(rendered, recipe_path.parent)
-            except (RuntimeError, OSError) as exc:
-                errors.append(f"{recipe_path}: kustomize failed: {exc}")
-                return "", errors
-        else:
-            errors.append(
-                f"{recipe_path}: config_overrides is true but config/kustomization.yaml missing"
-            )
-            return "", errors
+        effective_recipe = dict(recipe)
+        effective_recipe["serving"] = effective_serving
 
-    if not dry_run:
-        manifest_dir = recipe_path.parent / "manifests"
-        manifest_dir.mkdir(exist_ok=True)
-        kind = context["kind"]
-        filename = f"{kind.lower()}.yaml"
-        output_path = manifest_dir / filename
-        output_path.write_text(rendered)
-        print(f"  wrote {output_path.relative_to(repo)}")
+        try:
+            template_path = select_template(stack, mode)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
 
-    return rendered, errors
+        context = build_template_context(effective_recipe, model, constraints, platform_entry)
+        rendered = render_template(template_path, context)
+
+        if effective_serving.get("config_overrides") is True:
+            config_dir = recipe_path.parent / "config"
+            kustomization = config_dir / "kustomization.yaml"
+            if kustomization.is_file():
+                try:
+                    rendered = run_kustomize(rendered, recipe_path.parent)
+                except (RuntimeError, OSError) as exc:
+                    errors.append(f"{recipe_path}: kustomize failed: {exc}")
+                    continue
+            else:
+                errors.append(
+                    f"{recipe_path}: config_overrides is true but config/kustomization.yaml missing"
+                )
+                continue
+
+        if not dry_run:
+            stack_dir = f"{stack}-{version}" if version else stack
+            manifest_dir = recipe_path.parent / "manifests" / stack_dir
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            kind = context["kind"]
+            filename = f"{kind.lower()}.yaml"
+            output_path = manifest_dir / filename
+            output_path.write_text(rendered)
+            print(f"  wrote {output_path.relative_to(repo)}")
+
+        all_rendered.append(rendered)
+
+    return "\n---\n".join(all_rendered), errors
 
 
 def main() -> int:
@@ -312,7 +416,7 @@ def main() -> int:
         recipe_paths = [p.resolve() for p in args.recipes]
     else:
         recipe_paths = sorted(
-            repo.glob("models/**/recipes/*/*/*/recipe.yaml")
+            repo.glob("models/*/recipes/*/recipe.yaml")
         )
 
     all_errors: list[str] = []

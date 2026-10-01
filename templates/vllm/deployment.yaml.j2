@@ -30,20 +30,20 @@ spec:
               vllm serve "$@"
             - --
           args:
-            - {{ model }}
-            - --served-model-name={{ model }}
+            - {{ model | tojson }}
+            - {{ ("--served-model-name=" ~ model) | tojson }}
 {% for arg in args %}
 {% if arg.value is defined and arg.value is not none %}
-            - {{ arg.flag }}={{ arg.value }}
+            - {{ (arg.flag ~ "=" ~ arg.value) | tojson }}
 {% else %}
-            - {{ arg.flag }}
+            - {{ arg.flag | tojson }}
 {% endif %}
 {% endfor %}
 {% if tp > 1 %}
-            - --tensor-parallel-size={{ tp }}
+            - {{ ("--tensor-parallel-size=" ~ tp) | tojson }}
 {% endif %}
 {% if dp > 1 %}
-            - --data-parallel-size={{ dp }}
+            - {{ ("--data-parallel-size=" ~ dp) | tojson }}
 {% endif %}
           env:
             - name: HF_TOKEN
@@ -53,10 +53,10 @@ spec:
                   key: HF_TOKEN
 {% for e in env %}
 {% if e.value is defined %}
-            - name: {{ e.name }}
-              value: "{{ e.value }}"
+            - name: {{ e.name | tojson }}
+              value: {{ e.value | tojson }}
 {% elif e.value_from is defined %}
-            - name: {{ e.name }}
+            - name: {{ e.name | tojson }}
               valueFrom: {{ e.value_from | tojson }}
 {% endif %}
 {% endfor %}
@@ -78,7 +78,6 @@ spec:
             capabilities:
               drop:
                 - ALL
-            readOnlyRootFilesystem: true
           startupProbe:
             httpGet:
               path: /health
@@ -98,11 +97,21 @@ spec:
               port: {{ port }}
             periodSeconds: 10
             timeoutSeconds: 5
-{% if tp > 1 %}
           volumeMounts:
+            - name: hf-cache
+              mountPath: /home/nobody/.cache
+            - name: tmp
+              mountPath: /tmp
+{% if tp > 1 %}
             - name: dshm
               mountPath: /dev/shm
+{% endif %}
       volumes:
+        - name: hf-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+{% if tp > 1 %}
         - name: dshm
           emptyDir:
             medium: Memory

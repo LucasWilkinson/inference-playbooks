@@ -47,10 +47,14 @@ def _match_sub_scope(scope_value: object, context_value: object) -> bool:
     if isinstance(scope_value, dict):
         if not isinstance(context_value, dict):
             return False
-        return all(
-            key in context_value and context_value[key] == value
-            for key, value in scope_value.items()
-        )
+        for key, value in scope_value.items():
+            ctx_val = context_value.get(key)
+            if key == "mode" and isinstance(value, str) and isinstance(ctx_val, str):
+                if value not in ctx_val.split("+"):
+                    return False
+            elif ctx_val != value:
+                return False
+        return True
     return scope_value == context_value
 
 
@@ -197,32 +201,21 @@ def _extract_contributor_flags(recipe: dict) -> dict[str, str | None]:
 
     serving = recipe.get("serving", {})
     if isinstance(serving, dict):
-        args = serving.get("args", [])
-        if isinstance(args, list):
-            for arg in args:
-                if isinstance(arg, dict) and "flag" in arg:
-                    result[arg["flag"]] = arg.get("value")
-
-    deployment = recipe.get("deployment", {})
-    if isinstance(deployment, dict):
-        components = deployment.get("components", {})
-        if isinstance(components, dict):
-            for component in components.values():
-                if not isinstance(component, dict):
-                    continue
-                for section in ("containers", "init_containers"):
-                    containers = component.get(section, {})
-                    if isinstance(containers, dict):
-                        for container in containers.values():
-                            if not isinstance(container, dict):
-                                continue
-                            for cli_arg in container.get("args", []):
-                                if isinstance(cli_arg, str) and cli_arg.startswith("--"):
-                                    if "=" in cli_arg:
-                                        flag, value = cli_arg.split("=", 1)
-                                        result[flag] = value
-                                    else:
-                                        result[cli_arg] = None
+        for arg_list_key in ("args",):
+            args = serving.get(arg_list_key, [])
+            if isinstance(args, list):
+                for arg in args:
+                    if isinstance(arg, dict) and "flag" in arg:
+                        result[arg["flag"]] = arg.get("value")
+        for role_name in ("decode", "prefill"):
+            role_block = serving.get(role_name, {})
+            if isinstance(role_block, dict):
+                for arg_key in ("args", "leader_args", "worker_args"):
+                    role_args = role_block.get(arg_key, [])
+                    if isinstance(role_args, list):
+                        for arg in role_args:
+                            if isinstance(arg, dict) and "flag" in arg:
+                                result[arg["flag"]] = arg.get("value")
 
     return result
 

@@ -62,7 +62,7 @@ workload_profile: guidellm-8k1k
 deployment_mode: tp1-tool-calling
 
 serving:
-  image: vllm/vllm-openai:v0.24.0
+  image: docker.io/vllm/vllm-openai:v0.24.0
   model: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
   parallelism:
     mode: tp

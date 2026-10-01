@@ -19,7 +19,7 @@ import yaml
 
 PROFILE_ROOT = "hardware-profiles"
 RECIPE_PATH = re.compile(
-    r"^models/[^/]+/[^/]+/[^/]+/recipes/[^/]+/[^/]+/[^/]+/recipe\.yaml$"
+    r"^models/[^/]+/recipes/[^/]+/recipe\.yaml$"
 )
 
 

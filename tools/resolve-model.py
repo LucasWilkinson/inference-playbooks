@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -21,7 +22,11 @@ import yaml
 def fetch_config(model_id: str) -> dict:
     """Fetch config.json from HuggingFace for a model."""
     url = f"https://huggingface.co/{model_id}/resolve/main/config.json"
-    request = urllib.request.Request(url, headers={"User-Agent": "inference-playbooks/resolve-model"})
+    headers = {"User-Agent": "inference-playbooks/resolve-model"}
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read())

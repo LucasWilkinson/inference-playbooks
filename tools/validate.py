@@ -24,6 +24,7 @@ SCHEMAS = {
     "hardware-profile": "hardware-profile.schema.json",
     "benchmark-run": "benchmark-run.schema.json",
     "benchmark-result": "benchmark-result.schema.json",
+    "platform-overrides": "platform-overrides.schema.json",
 }
 
 PARALLELISM_FLAGS = frozenset({
@@ -78,14 +79,6 @@ def contained_path(root: Path, relative_path: object) -> Path | None:
     return candidate
 
 
-def nested_mapping(value: object, *keys: str) -> dict:
-    """Return a nested mapping, or an empty mapping when a path is absent."""
-    for key in keys:
-        if not isinstance(value, dict):
-            return {}
-        value = value.get(key)
-    return value if isinstance(value, dict) else {}
-
 
 def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_converted: bool = False) -> list[str]:
     """Check initial-release raw submissions without requiring a recipe yet."""
@@ -96,16 +89,12 @@ def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_conver
             continue
         parts = directory.relative_to(repo).parts
         if (
-            len(parts) != 9 or parts[0] != "models" or parts[4] != "recipes"
-            or parts[8] != "raw-manifest"
+            len(parts) != 5 or parts[0] != "models" or parts[2] != "recipes"
+            or parts[4] != "raw-manifest"
             or not re.fullmatch(properties["model_id"]["pattern"], parts[1])
-            or parts[2] not in properties["platform"]["properties"]["stack"]["enum"]
-            or not re.fullmatch(properties["platform"]["properties"]["version"]["pattern"], parts[3])
-            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]+", parts[5])
-            or parts[6] not in properties["workload_profile"]["enum"]
-            or not re.fullmatch(properties["deployment_mode"]["pattern"], parts[7])
+            or not re.fullmatch(properties["recipe_id"]["pattern"], parts[3])
         ):
-            errors.append(f"{directory}: raw-manifest must be under a Recipe v3 leaf directory")
+            errors.append(f"{directory}: raw-manifest must be under models/<model>/recipes/<recipe>/raw-manifest")
             continue
         if require_converted and not (directory.parent / "recipe.yaml").is_file():
             errors.append(f"{directory}: maintainer conversion required before merge: recipe.yaml is missing")
@@ -136,51 +125,6 @@ def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_conver
                 errors.append(f"{path}: raw manifest must contain at least one YAML object document")
         if not manifest_count:
             errors.append(f"{directory}: raw-manifest needs at least one YAML or JSON file")
-    return errors
-
-
-def validate_component_containers(recipe_path: Path, name: str, component: dict, source: dict) -> list[str]:
-    """Check that each labelled override names a container in its source pod."""
-    kind = component["kind"]
-    if kind == "Deployment":
-        pod_paths = [(component, ("spec", "template", "spec"), "")]
-    elif kind == "LLMInferenceService":
-        pod_paths = [
-            (component.get("template", {}), ("spec", "template"), "template"),
-            (component.get("worker", {}), ("spec", "worker"), "worker"),
-        ]
-        prefill = component.get("prefill", {})
-        pod_paths.extend([
-            (prefill.get("template", {}), ("spec", "prefill", "template"), "prefill.template"),
-            (prefill.get("worker", {}), ("spec", "prefill", "worker"), "prefill.worker"),
-        ])
-    elif kind == "LeaderWorkerSet":
-        worker_path = ("spec", "leaderWorkerTemplate", "workerTemplate", "spec")
-        leader_path = ("spec", "leaderWorkerTemplate", "leaderTemplate", "spec")
-        if not nested_mapping(source, *leader_path):
-            leader_path = worker_path
-        pod_paths = [
-            (component.get("leader", {}), leader_path, "leader"),
-            (component.get("worker", {}), worker_path, "worker"),
-        ]
-    else:
-        return []
-    errors = []
-    for override, pod_path, role in pod_paths:
-        source_pod = nested_mapping(source, *pod_path)
-        for field, source_field in (("containers", "containers"), ("init_containers", "initContainers")):
-            for container_name in override.get(field, {}):
-                names = {
-                    container.get("name")
-                    for container in source_pod.get(source_field, [])
-                    if isinstance(container, dict)
-                }
-                if container_name not in names:
-                    location = f"{role}.{field}" if role else field
-                    errors.append(
-                        f"{recipe_path}: component {name} {location}.{container_name} "
-                        "is not in its source manifest"
-                    )
     return errors
 
 
@@ -248,10 +192,7 @@ def validate_recipe_notes(repo: Path, recipe_path: Path, recipe: dict, schema: d
             evidence_path = contained_path(recipe_path.parent, evidence)
             if not evidence_path or not evidence_path.is_relative_to((recipe_path.parent / "results").resolve()) or not evidence_path.is_file():
                 errors.append(f"{notes_path}: decision evidence does not exist: {evidence}")
-    components = recipe.get("deployment", {}).get("components", {})
     for image_choice in notes.get("image_choices", []):
-        if image_choice["component"] not in components:
-            errors.append(f"{notes_path}: image choice component does not exist: {image_choice['component']}")
         if recipe.get("maturity") in {"validated", "production"} and image_choice["status"]["state"] == "needs-verification":
             errors.append(f"{notes_path}: validated recipe cannot recommend an unverified image")
     return errors
@@ -341,6 +282,9 @@ def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict) -> list[str]
 
     # --- Role block validation (Phase 3) ---
     errors.extend(_validate_role_blocks(recipe_path, serving))
+
+    # --- Platform override file validation ---
+    errors.extend(_validate_platform_overrides(repo, recipe_path, recipe))
 
     return errors
 
@@ -433,6 +377,47 @@ def _validate_role_blocks(recipe_path: Path, serving: dict) -> list[str]:
     return errors
 
 
+def _validate_platform_overrides(repo: Path, recipe_path: Path, recipe: dict) -> list[str]:
+    """Validate platform override files referenced by platforms entries."""
+    errors: list[str] = []
+    platforms = recipe.get("platforms", [])
+    if not isinstance(platforms, list):
+        return errors
+    for entry in platforms:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("blocked"):
+            stack = entry.get("stack", "?")
+            version = entry.get("version", "?")
+            reason = entry.get("reason", "no reason given")
+            print(f"  info: {recipe_path}: platform {stack}-{version} blocked: {reason}")
+        overrides_ref = entry.get("overrides")
+        if not isinstance(overrides_ref, str):
+            continue
+        overrides_path = contained_path(recipe_path.parent, overrides_ref)
+        if not overrides_path:
+            errors.append(f"{recipe_path}: platform override escapes recipe directory: {overrides_ref}")
+            continue
+        if not overrides_path.is_file():
+            errors.append(f"{recipe_path}: platform override file does not exist: {overrides_ref}")
+            continue
+        try:
+            overrides = load_yaml(overrides_path)
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            errors.append(f"{recipe_path}: cannot load platform override {overrides_ref}: {error}")
+            continue
+        override_schema_path = repo / "schema" / "platform-overrides.schema.json"
+        if override_schema_path.is_file():
+            try:
+                override_schema = json.loads(override_schema_path.read_text())
+                registry = load_schema_registry(repo)
+                override_errors = validate_document(overrides_path, overrides, override_schema, registry)
+                errors.extend(override_errors)
+            except (OSError, json.JSONDecodeError) as error:
+                errors.append(f"{recipe_path}: cannot load platform override schema: {error}")
+    return errors
+
+
 def resolve_role_args(serving: dict, role_name: str, position: str = "leader") -> list[dict]:
     """Resolve final arg list for a role+position.
 
@@ -472,32 +457,21 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
     """Validate recipe layout, local references, and linked benchmark runs."""
     errors = []
     parts = recipe_path.relative_to(repo).parts
-    if len(parts) != 9 or parts[0] != "models" or parts[4] != "recipes":
-        return [f"{recipe_path}: does not follow the model/stack/version/recipes layout"]
-    model_id, stack, version = parts[1:4]
-    hardware_selector, workload, deployment_mode = parts[5:8]
+    if len(parts) != 5 or parts[0] != "models" or parts[2] != "recipes" or parts[4] != "recipe.yaml":
+        return [f"{recipe_path}: does not follow models/<model-id>/recipes/<recipe-id>/recipe.yaml layout"]
+    model_id = parts[1]
+    recipe_id_dir = parts[3]
     if recipe.get("model_id") != model_id:
         errors.append(f"{recipe_path}: model_id '{recipe.get('model_id')}' must match its model directory '{model_id}'")
     model_yaml = repo / "models" / model_id / "model.yaml"
     if not model_yaml.is_file():
         errors.append(f"{recipe_path}: models/{model_id}/model.yaml does not exist")
-    platform = recipe.get("platform", {})
-    if not isinstance(platform, dict):
-        platform = {}
-    if platform.get("stack") != stack or platform.get("version") != version:
-        errors.append(f"{recipe_path}: platform.stack/version '{platform.get('stack')}/{platform.get('version')}' must match its directory '{stack}/{version}'")
-    if recipe.get("workload_profile") != workload:
-        errors.append(f"{recipe_path}: workload_profile '{recipe.get('workload_profile')}' must match its directory segment '{workload}'")
-    if recipe.get("deployment_mode") != deployment_mode:
-        errors.append(f"{recipe_path}: deployment_mode '{recipe.get('deployment_mode')}' must match its directory segment '{deployment_mode}'")
     profile_path = contained_path(repo, recipe.get("hardware_profile"))
     if not profile_path or not profile_path.is_file():
         errors.append(f"{recipe_path}: hardware_profile does not exist: {recipe.get('hardware_profile')}")
     else:
         try:
-            profile = load_yaml(profile_path)
-            if hardware_selector not in {profile_path.stem, profile.get("accelerator_key")}:
-                errors.append(f"{recipe_path}: hardware selector must match the profile ID or accelerator_key")
+            load_yaml(profile_path)
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{recipe_path}: cannot load hardware_profile: {error}")
     run_references = recipe.get("benchmark_runs", [])
@@ -531,46 +505,6 @@ def validate_recipe_layout(repo: Path, recipe_path: Path, recipe: dict, runs_by_
             continue
         if not manifest_path.is_file():
             errors.append(f"{recipe_path}: manifest does not exist: {manifest.get('path')}")
-    # v3 component validation (v4 recipes use serving block instead)
-    schema_version = recipe.get("schema_version")
-    if schema_version != 4:
-        components = deployment.get("components", {}) if isinstance(deployment, dict) else {}
-        if not isinstance(components, dict):
-            components = {}
-        for name, component in components.items():
-            source_ref = component.get("values") if component.get("kind") == "llmd-router" else component.get("source")
-            source_path = contained_path(recipe_path.parent, source_ref)
-            if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
-                errors.append(f"{recipe_path}: component {name} source escapes config/: {source_ref}")
-                continue
-            if not source_path.is_file():
-                errors.append(f"{recipe_path}: component {name} source does not exist: {source_ref}")
-                continue
-            try:
-                source = load_yaml(source_path)
-            except (OSError, ValueError, yaml.YAMLError) as error:
-                errors.append(f"{recipe_path}: cannot load component {name} source: {error}")
-                continue
-            if component.get("kind") != "llmd-router" and source.get("kind") != component.get("kind"):
-                errors.append(f"{recipe_path}: component {name} source kind must be {component.get('kind')}")
-            elif component.get("kind") != "llmd-router":
-                errors.extend(validate_component_containers(recipe_path, name, component, source))
-        for auxiliary in deployment.get("auxiliary_sources", []):
-            source_ref = auxiliary["path"]
-            source_path = contained_path(recipe_path.parent, source_ref)
-            if not source_path or not source_path.is_relative_to((recipe_path.parent / "config").resolve()):
-                errors.append(f"{recipe_path}: auxiliary source escapes config/: {source_ref}")
-                continue
-            if not source_path.is_file():
-                errors.append(f"{recipe_path}: auxiliary source does not exist: {source_ref}")
-                continue
-            try:
-                source = load_yaml(source_path)
-            except (OSError, ValueError, yaml.YAMLError) as error:
-                errors.append(f"{recipe_path}: cannot load auxiliary source {source_ref}: {error}")
-                continue
-            if source.get("kind") != auxiliary["kind"]:
-                errors.append(f"{recipe_path}: auxiliary source {source_ref} kind must be {auxiliary['kind']}")
     return errors
 
 
@@ -680,7 +614,7 @@ def main() -> int:
             models_by_id[mid] = model_data
 
     recipe_ids: dict[str, Path] = {}
-    for path in sorted(repo.glob("models/**/recipes/*/*/*/recipe.yaml")):
+    for path in sorted(repo.glob("models/*/recipes/*/recipe.yaml")):
         try:
             recipe = load_yaml(path)
         except (OSError, ValueError, yaml.YAMLError) as error:
@@ -696,9 +630,7 @@ def main() -> int:
                 errors.append(f"{path}: duplicate recipe_id '{rid}' also used by {recipe_ids[rid]}")
             else:
                 recipe_ids[rid] = path
-        schema_version = recipe.get("schema_version")
-        if schema_version == 4:
-            errors.extend(validate_v4_recipe(repo, path, recipe))
+        errors.extend(validate_v4_recipe(repo, path, recipe))
         errors.extend(validate_recipe_layout(repo, path, recipe, runs_by_path))
         errors.extend(validate_recipe_notes(repo, path, recipe, schemas["recipe-notes"], registry))
         if flag_constraints is not None:

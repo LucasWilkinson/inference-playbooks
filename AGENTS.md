@@ -23,48 +23,45 @@ Use this hierarchy for new model playbooks:
 ```text
 schema/
   recipe.schema.json
+  platform-overrides.schema.json
   model.schema.json
   CHANGELOG.md
 hardware-profiles/
   <hardware-profile>.yaml
 models/<model-id>/
   model.yaml
-  <stack>/<stack-version>/
-    model-ops/
-    recipes/<hardware-profile>/
-      <workload-profile>/
-        <deployment-mode>[--<suffix>]/
-          raw-manifest/   # initial-release intake, when used
-          recipe.yaml
-          config/
-          manifests/
-          guides/
-          benchmarks/
-          results/
+  recipes/<recipe-id>/
+    recipe.yaml
+    platforms/
+      <stack>-<version>.yaml   # per-platform override files
+    raw-manifest/              # initial-release intake, when used
+    config/
+    manifests/
+      <stack>-<version>/       # generated per platform
+    guides/
+    benchmarks/
+    results/
 catalog/
 tools/
 .github/workflows/
 ```
 
-`<stack>` is a serving stack such as `rhoai` or `llm-d`. `<stack-version>` is
-the version the recipe targets (for example, `3.5`). Do not place RHOAI- or
-llm-d-specific model operations directly under the model root: downstream
-framework limitations are part of the stack/version context.
+`<recipe-id>` encodes hardware and deployment context as a prefix, such as
+`h200-x8-pp2-tp8-agentx-128k` or `h200-x8-mtp-single-gpu-8k1k`. Stack,
+version, hardware, and workload are no longer path segments — they are fields
+in `recipe.yaml`.
 
-`<hardware-profile>` is a normalized, lowercase, hyphenated identifier such as
-`h200-sxm8` or `mi300x-8gpu`. In a recipe path it is a navigation selector, not
-the source of physical facts. Each `recipe.yaml` must explicitly reference the
-matching root-level `hardware-profiles/<hardware-profile>.yaml`.
-`<workload-profile>` is one of the reusable benchmark workloads from PR #7:
-`guidellm-8k1k`, `aiperf-agentx-128k`, or
-`aiperf-agentx-unlimited-context`. `<deployment-mode>` identifies the
-configuration pattern, such as `tp8-aggregated`, `tp8-replicas-2`, or
-`pp2-tp8`. A suffix is allowed only when more than one recipe shares the same
-deployment mode (for example, `tp8-aggregated--prefix-cache-off`).
+Each `recipe.yaml` declares a `platforms` array with one or more entries.
+Each platform entry specifies `stack`, `version`, and `overrides` (path to a
+file under `platforms/`). Override files are validated against
+`platform-overrides.schema.json`. A platform with no customizations uses an
+empty override file.
 
-Recipe v3 requires `deployment.scope` to be either `single-node` or
-`multi-node`. `match.nodes` is retired; do not reintroduce it as a second node
-scope field.
+Each `recipe.yaml` must explicitly reference the matching root-level
+`hardware-profiles/<hardware-profile>.yaml`.
+
+Recipe v4 requires `deployment.scope` to be either `single-node` or
+`multi-node`.
 
 Each recipe declares `optimization_intent` as a concise catalog label.
 `latency` and `throughput` are the standard values, but a recipe creator may
@@ -91,28 +88,16 @@ files. This exception ends after the initial release.
   applicable network/interconnect facts. Keep GPU model/count/memory,
   topology, host requirements, and any RDMA/RoCE/DRA/SR-IOV configuration
   together.
-- `recipe.yaml` owns the workload-specific serving configuration, compatibility
-  claim, component references, references to manifests/benchmark runs, and
-  display-safe summary.
-- `deployment.components` names each Deployment, LLMInferenceService,
-  LeaderWorkerSet, or llm-d router component. Each component has its own schema
-  and references a recipe-local source in `config/`. Container settings are
-  labelled by their actual pod role and container name within that component;
-  LWS can specify different leader and worker settings.
-- `deployment.auxiliary_sources` lists supporting `config/` manifests, such as
-  a Service or LLMInferenceServiceConfig, by path and Kubernetes kind.
-- `config/` contains the editable, manifest-specific source YAML or router
-  values. Start from a tested example. Structured container overrides in
-  `recipe.yaml` use ordered `command` and `args` string lists, an `env` list,
-  and optional per-container `resources.requests`/`resources.limits`. Keep
-  subcommands, positional values, and flags as exact tokens; do not classify
-  CLI options. Omit `command` to use the image entrypoint. Environment entries
-  use `name` with either `value` or `value_from`. A resource override changes
-  only the named resource keys; other values stay in the source manifest.
-  `arg_choices` may annotate selected flags with `flag`, optional `value`,
-  `required` (essential to this recipe), and `why`. These notes never replace
-  the exact argv. An imported manifest may leave `arg_choices` empty until its
-  rationale has been confirmed.
+- `recipe.yaml` owns the workload-specific serving configuration via the
+  `serving` block (image, model, parallelism, args, env, resources, port),
+  multi-platform targeting via `platforms`, and references to
+  manifests/benchmark runs.
+- `platforms/` contains per-platform override files referenced by
+  `platforms[].overrides`. Override merge: image/resources/router replace,
+  env appends, args merge by flag. Templates derive the K8s component kind
+  from `(platform.stack, parallelism.mode)`.
+- `config/` contains optional Kustomize overlay patches when
+  `serving.config_overrides` is true.
 - `raw-manifest/` preserves the initial submitted inputs for maintainer
   conversion. It may contain multi-document YAML or JSON and an optional
   README. After conversion, `config/` and `recipe.yaml` are authoritative.

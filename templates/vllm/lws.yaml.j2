@@ -25,8 +25,8 @@ spec:
             command: ["sh", "-c"]
             args:
               - |
-                vllm serve {{ model }} \
-                  --served-model-name={{ model }} \
+                vllm serve {{ model | tojson }} \
+                  --served-model-name={{ model | tojson }} \
                   --tensor-parallel-size {{ tp }} \
                   --pipeline-parallel-size {{ pp }} \
                   --nnodes {{ pp }} \
@@ -35,12 +35,12 @@ spec:
                   --port {{ port }} \
 {% for arg in leader_args %}
 {% if arg.value is defined and arg.value is not none %}
-                  {{ arg.flag }}={{ arg.value }} \
+                  {{ arg.flag }}={{ arg.value | tojson }} \
 {% else %}
                   {{ arg.flag }} \
 {% endif %}
 {% endfor %}
-                  --served-model-name={{ model }}
+
             env:
               - name: HF_TOKEN
                 valueFrom:
@@ -49,10 +49,10 @@ spec:
                     key: HF_TOKEN
 {% for e in env %}
 {% if e.value is defined %}
-              - name: {{ e.name }}
-                value: "{{ e.value }}"
+              - name: {{ e.name | tojson }}
+                value: {{ e.value | tojson }}
 {% elif e.value_from is defined %}
-              - name: {{ e.name }}
+              - name: {{ e.name | tojson }}
                 valueFrom: {{ e.value_from | tojson }}
 {% endif %}
 {% endfor %}
@@ -72,7 +72,6 @@ spec:
               capabilities:
                 drop:
                   - ALL
-              readOnlyRootFilesystem: true
             startupProbe:
               httpGet:
                 path: /health
@@ -88,11 +87,19 @@ spec:
             volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: /home/nobody/.cache
+              - name: tmp
+                mountPath: /tmp
         volumes:
           - name: dshm
             emptyDir:
               medium: Memory
               sizeLimit: 4Gi
+          - name: hf-cache
+            emptyDir: {}
+          - name: tmp
+            emptyDir: {}
     workerTemplate:
       spec:
         securityContext:
@@ -106,8 +113,8 @@ spec:
             command: ["sh", "-c"]
             args:
               - |
-                vllm serve {{ model }} \
-                  --served-model-name={{ model }} \
+                vllm serve {{ model | tojson }} \
+                  --served-model-name={{ model | tojson }} \
                   --tensor-parallel-size {{ tp }} \
                   --pipeline-parallel-size {{ pp }} \
                   --nnodes {{ pp }} \
@@ -116,12 +123,12 @@ spec:
                   --headless \
 {% for arg in worker_args %}
 {% if arg.value is defined and arg.value is not none %}
-                  {{ arg.flag }}={{ arg.value }} \
+                  {{ arg.flag }}={{ arg.value | tojson }} \
 {% else %}
                   {{ arg.flag }} \
 {% endif %}
 {% endfor %}
-                  --served-model-name={{ model }}
+
             env:
               - name: HF_TOKEN
                 valueFrom:
@@ -130,10 +137,10 @@ spec:
                     key: HF_TOKEN
 {% for e in env %}
 {% if e.value is defined %}
-              - name: {{ e.name }}
-                value: "{{ e.value }}"
+              - name: {{ e.name | tojson }}
+                value: {{ e.value | tojson }}
 {% elif e.value_from is defined %}
-              - name: {{ e.name }}
+              - name: {{ e.name | tojson }}
                 valueFrom: {{ e.value_from | tojson }}
 {% endif %}
 {% endfor %}
@@ -151,12 +158,19 @@ spec:
               capabilities:
                 drop:
                   - ALL
-              readOnlyRootFilesystem: true
             volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: /home/nobody/.cache
+              - name: tmp
+                mountPath: /tmp
         volumes:
           - name: dshm
             emptyDir:
               medium: Memory
               sizeLimit: 4Gi
+          - name: hf-cache
+            emptyDir: {}
+          - name: tmp
+            emptyDir: {}

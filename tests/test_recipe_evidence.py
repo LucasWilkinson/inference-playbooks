@@ -51,9 +51,12 @@ correction_log:
         model = directory / "models" / "glm" / "model.yaml"
         model.parent.mkdir(parents=True)
         model.write_text("schema_version: 1\nmodel_id: glm\nname: GLM\nfamily: GLM\nquantizations:\n  - name: FP8\n")
-        recipe = directory / "models" / "glm" / "rhoai" / "3.5" / "recipes" / "h200-r1" / "guidellm-8k1k" / "tp8-aggregated" / "recipe.yaml"
+        recipe = directory / "models" / "glm" / "recipes" / "h200-tp8-aggregated" / "recipe.yaml"
         recipe.parent.mkdir(parents=True)
         recipe.write_text("recipe_id: guidellm-tp8\nhardware_profile: hardware-profiles/h200-r1.yaml\n")
+        platforms_dir = recipe.parent / "platforms"
+        platforms_dir.mkdir()
+        (platforms_dir / "rhoai-3.5.yaml").write_text("{}\n")
         git(directory, "add", ".")
         git(directory, "commit", "-qm", "initial")
         return directory, profile, recipe
@@ -84,19 +87,22 @@ correction_log:
 
     def sample_recipe(self):
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "recipe_id": "glm-guidellm-tp8",
             "model_id": "glm",
-            "platform": {"stack": "rhoai", "version": "3.5"},
+            "platforms": [{"stack": "rhoai", "version": "3.5", "overrides": "platforms/rhoai-3.5.yaml"}],
             "hardware_profile": "hardware-profiles/h200-r1.yaml",
             "workload_profile": "guidellm-8k1k",
             "deployment_mode": "tp8-aggregated",
             "optimization_intent": "latency",
             "maturity": "day-zero",
-            "deployment": {
-                "scope": "single-node",
-                "components": {"modelserver": {"kind": "Deployment", "source": "config/modelserver.yaml"}},
+            "serving": {
+                "image": "vllm/vllm-openai:v0.24.0",
+                "model": "RedHatAI/GLM-FP8",
+                "parallelism": {"mode": "tp", "tp": 8},
+                "args": [{"flag": "--enable-auto-tool-choice", "required": True, "why": "Tool calling."}],
             },
+            "deployment": {"scope": "single-node"},
         }
 
     def test_profile_correction_is_allowed_with_a_revision_and_log(self):
@@ -162,7 +168,7 @@ correction_log:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"all": False, "recipes": ["models/glm/rhoai/3.5/recipes/h200-r1/guidellm-8k1k/tp8-aggregated"]},
+            {"all": False, "recipes": ["models/glm/recipes/h200-tp8-aggregated"]},
         )
 
     def test_profile_correction_selects_referencing_recipe(self):
@@ -176,7 +182,7 @@ correction_log:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"all": False, "recipes": ["models/glm/rhoai/3.5/recipes/h200-r1/guidellm-8k1k/tp8-aggregated"]},
+            {"all": False, "recipes": ["models/glm/recipes/h200-tp8-aggregated"]},
         )
 
     def test_staged_profile_correction_ignores_unstaged_recipe_edits(self):
@@ -191,7 +197,7 @@ correction_log:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"all": False, "recipes": ["models/glm/rhoai/3.5/recipes/h200-r1/guidellm-8k1k/tp8-aggregated"]},
+            {"all": False, "recipes": ["models/glm/recipes/h200-tp8-aggregated"]},
         )
 
     def test_validator_reports_invalid_document_shapes_without_a_traceback(self):
@@ -212,11 +218,8 @@ correction_log:
         validator = self.recipe_validator()
         self.assertFalse(list(validator.iter_errors(recipe)))
 
-        missing_scope = {**recipe, "deployment": {"components": recipe["deployment"]["components"]}}
+        missing_scope = {**recipe, "deployment": {}}
         self.assertTrue(list(validator.iter_errors(missing_scope)))
-
-        missing_components = {**recipe, "deployment": {"scope": "single-node"}}
-        self.assertTrue(list(validator.iter_errors(missing_components)))
 
         legacy_containers = {**recipe, "deployment": {**recipe["deployment"], "containers": {}}}
         self.assertTrue(list(validator.iter_errors(legacy_containers)))
@@ -226,14 +229,6 @@ correction_log:
 
         custom_intent = {**recipe, "optimization_intent": "lowest cost at 128K context"}
         self.assertFalse(list(validator.iter_errors(custom_intent)))
-
-    def test_recipe_schema_accepts_component_examples(self):
-        validator = self.recipe_validator()
-        recipe = self.sample_recipe()
-        for path in sorted((REPO / "schema" / "examples").glob("*.components.yaml")):
-            with self.subTest(example=path.name):
-                recipe["deployment"]["components"] = yaml.safe_load(path.read_text())
-                self.assertFalse(list(validator.iter_errors(recipe)))
 
     def test_reader_notes_example_matches_schema(self):
         schemas = [json.loads(path.read_text()) for path in (REPO / "schema").glob("*.schema.json")]
@@ -247,133 +242,6 @@ correction_log:
     def test_unquoted_status_date_remains_a_schema_string(self):
         notes = load_unique_yaml("schema_version: 1\ndecisions:\n  - subjects: [image]\n    why: Verified in CI.\n    status: {state: verified, date: 2026-08-12, method: CI}\n")
         self.assertEqual(notes["decisions"][0]["status"]["date"], "2026-08-12")
-
-    def test_recipe_schema_rejects_invalid_component_settings(self):
-        validator = self.recipe_validator()
-        recipe = self.sample_recipe()
-        recipe["deployment"]["components"] = yaml.safe_load(
-            (REPO / "schema" / "examples" / "lws-pd.components.yaml").read_text()
-        )
-        self.assertFalse(list(validator.iter_errors(recipe)))
-
-        worker = recipe["deployment"]["components"]["prefill"]["worker"]["containers"]["vllm"]
-        worker["args"] = ["serve", 8]
-        self.assertTrue(list(validator.iter_errors(recipe)))
-
-        worker["args"] = ["serve"]
-        worker["env"] = [{"name": "TOKEN", "value": "inline", "value_from": {"secretKeyRef": {"name": "token", "key": "value"}}}]
-        self.assertTrue(list(validator.iter_errors(recipe)))
-
-        worker["env"] = [{"name": "TOKEN", "value": "inline"}]
-        worker["resources"] = {"requests": {"nvidia.com/gpu": -1}}
-        self.assertTrue(list(validator.iter_errors(recipe)))
-
-        worker["resources"] = {"requests": {"nvidia.com/gpu": "8"}}
-        worker["arg_choices"] = [{"flag": "--tensor-parallel-size", "why": "Matches GPU count."}]
-        self.assertTrue(list(validator.iter_errors(recipe)))
-
-        worker["arg_choices"][0]["required"] = True
-        self.assertFalse(list(validator.iter_errors(recipe)))
-
-        worker["arg_choices"] = []
-        self.assertFalse(list(validator.iter_errors(recipe)))
-
-        recipe["deployment"]["components"]["prefill"]["kind"] = "Deployment"
-        self.assertTrue(list(validator.iter_errors(recipe)))
-
-    def test_validator_checks_component_source_and_container_names(self):
-        directory, profile, recipe_path = self.make_repo()
-        shutil.copytree(REPO / "schema", directory / "schema")
-        profile.write_text(self.profile_text.format(revision=1, correction="").replace(
-            "profile_id: h200-r1", "profile_id: h200-r1\nkind: hardware-profile"
-        ))
-        recipe = self.sample_recipe()
-        recipe["deployment"]["components"] = {
-            "modelserver": {
-                "kind": "Deployment",
-                "source": "config/modelserver.yaml",
-                "containers": {"vllm": {"args": ["serve", "model"]}},
-            }
-        }
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        source = recipe_path.parent / "config" / "modelserver.yaml"
-        source.parent.mkdir()
-        source.write_text(yaml.safe_dump({
-            "kind": "Deployment",
-            "spec": {"template": {"spec": {"containers": [{"name": "vllm"}]}}},
-        }))
-        result = self.run_validator(directory, "--current")
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        recipe["deployment"]["components"]["modelserver"]["containers"] = {"missing": {"args": ["serve"]}}
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        result = self.run_validator(directory, "--current")
-        self.assertIn("not in its source manifest", result.stderr)
-
-        recipe["deployment"]["components"]["modelserver"]["containers"] = {"vllm": {"args": ["serve"]}}
-        recipe["deployment"]["components"]["modelserver"]["source"] = "config/absent.yaml"
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        result = self.run_validator(directory, "--current")
-        self.assertIn("source does not exist", result.stderr)
-
-    def test_validator_resolves_distinct_lws_leader_and_worker_roles(self):
-        directory, profile, recipe_path = self.make_repo()
-        shutil.copytree(REPO / "schema", directory / "schema")
-        profile.write_text(self.profile_text.format(revision=1, correction="").replace(
-            "profile_id: h200-r1", "profile_id: h200-r1\nkind: hardware-profile"
-        ))
-        recipe = self.sample_recipe()
-        recipe["deployment"] = {
-            "scope": "multi-node",
-            "components": {
-                "prefill": {
-                    "kind": "LeaderWorkerSet",
-                    "source": "config/prefill.yaml",
-                    "leader": {"containers": {"vllm": {"args": ["serve", "--leader"]}}},
-                    "worker": {"containers": {"vllm": {"args": ["serve", "--worker"]}}},
-                },
-            },
-        }
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        source = recipe_path.parent / "config" / "prefill.yaml"
-        source.parent.mkdir()
-        source.write_text(yaml.safe_dump({
-            "kind": "LeaderWorkerSet",
-            "spec": {"leaderWorkerTemplate": {
-                "workerTemplate": {"spec": {"containers": [{"name": "vllm"}]}},
-            }},
-        }))
-        result = self.run_validator(directory, "--current")
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        recipe["deployment"]["components"]["prefill"]["leader"]["containers"] = {"missing": {"args": ["serve"]}}
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        result = self.run_validator(directory, "--current")
-        self.assertIn("leader.containers.missing is not in its source manifest", result.stderr)
-
-    def test_validator_checks_auxiliary_sources(self):
-        directory, profile, recipe_path = self.make_repo()
-        shutil.copytree(REPO / "schema", directory / "schema")
-        profile.write_text(self.profile_text.format(revision=1, correction="").replace(
-            "profile_id: h200-r1", "profile_id: h200-r1\nkind: hardware-profile"
-        ))
-        recipe = self.sample_recipe()
-        recipe["deployment"]["auxiliary_sources"] = [{"path": "config/service.yaml", "kind": "Service"}]
-        recipe_path.write_text(yaml.safe_dump(recipe))
-        config = recipe_path.parent / "config"
-        config.mkdir()
-        (config / "modelserver.yaml").write_text("kind: Deployment\n")
-        (config / "service.yaml").write_text("kind: Service\n")
-        result = self.run_validator(directory, "--current")
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        (config / "service.yaml").write_text("kind: ConfigMap\n")
-        result = self.run_validator(directory, "--current")
-        self.assertIn("auxiliary source config/service.yaml kind must be Service", result.stderr)
-
-        (config / "service.yaml").unlink()
-        result = self.run_validator(directory, "--current")
-        self.assertIn("auxiliary source does not exist", result.stderr)
 
     def test_raw_only_leaf_accepts_multidoc_yaml_and_rejects_duplicates(self):
         directory, profile, recipe_path = self.make_repo()
@@ -416,7 +284,7 @@ correction_log:
         wrong.parent.mkdir(parents=True)
         wrong.write_text("kind: Deployment\n")
         result = self.run_validator(directory, "--current")
-        self.assertIn("raw-manifest must be under a Recipe v3 leaf directory", result.stderr)
+        self.assertIn("raw-manifest must be under models/<model>/recipes/<recipe>/raw-manifest", result.stderr)
 
     def test_validator_checks_reader_note_references(self):
         directory, profile, recipe_path = self.make_repo()
@@ -459,6 +327,7 @@ correction_log:
         }]
         notes_path.write_text(yaml.safe_dump(notes))
         recipe["maturity"] = "validated"
+        recipe["image"] = {"recommended": {"ref": "docker.io/vllm/vllm-openai:v0.24.0", "status": {"state": "needs-verification", "note": "Pending"}}}
         recipe["benchmark_runs"] = ["results/run-1/run.yaml"]
         run_path = recipe_path.parent / "results" / "run-1" / "run.yaml"
         run_path.parent.mkdir(parents=True)
@@ -484,56 +353,33 @@ correction_log:
         result = self.run_validator(directory, "--current")
         self.assertIn("cannot recommend an unverified image", result.stderr)
 
-    def test_complete_day_zero_examples_preserve_source_manifests(self):
-        examples = [
-            (
-                "models/gemma-4/vllm/v0.24.0/recipes/nvidia-h200-x8/guidellm-8k1k/mtp-single-gpu",
-                "models/gemma-4/vllm/v0.24.0/single-node/manifests/gemma-4-26b-a4b-it-fp8-deployment.yaml",
-                "config/modelserver.yaml", "Deployment",
-            ),
-            (
-                "models/glm-5.2/rhoai/3.5/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8",
-                "models/glm-5.2/rhoai/3.5/multi-node-pp/manifests/pp2-tp8-llmisvc.yaml",
-                "config/llmisvc.yaml", "LLMInferenceService",
-            ),
-            (
-                "models/glm-5.2/vllm/v0.23.0/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8",
-                "models/glm-5.2/vllm/v0.23.0/multi-node-lws/manifests/pp2-tp8-lws.yaml",
-                "config/lws.yaml", "LeaderWorkerSet",
-            ),
+    def test_v4_recipes_have_serving_block_and_platforms(self):
+        recipes = [
+            "models/gemma-4/recipes/h200-x8-mtp-single-gpu-8k1k",
+            "models/glm-5.2/recipes/h200-x8-pp2-tp8-agentx-128k-rhoai",
+            "models/glm-5.2/recipes/h200-x8-pp2-tp8-agentx-128k-vllm",
+            "models/qwen3-235b-a22b/recipes/h200-x8-pp2-tp8-agentx-128k",
         ]
-        for directory, original, source, kind in examples:
-            with self.subTest(kind=kind):
+        for directory in recipes:
+            with self.subTest(recipe=directory):
                 root = REPO / directory
                 recipe = yaml.safe_load((root / "recipe.yaml").read_text())
-                component = recipe["deployment"]["components"]["modelserver"]
+                self.assertEqual(recipe["schema_version"], 4)
                 self.assertEqual(recipe["maturity"], "day-zero")
-                self.assertNotIn("benchmark_runs", recipe)
-                self.assertEqual(component["kind"], kind)
-                self.assertEqual(component["source"], source)
-                if kind == "Deployment":
-                    roles = [component["containers"]]
-                elif kind == "LLMInferenceService":
-                    roles = [component["template"]["containers"], component["worker"]["containers"]]
-                else:
-                    roles = [component["leader"]["containers"], component["worker"]["containers"]]
-                for containers in roles:
-                    self.assertTrue(any(runtime.get("arg_choices") for runtime in containers.values()))
-                self.assertTrue((root / recipe["notes"]).is_file())
+                self.assertIn("serving", recipe)
+                self.assertIn("platforms", recipe)
+                serving = recipe["serving"]
+                self.assertIn("image", serving)
+                self.assertIn("model", serving)
+                self.assertIn("parallelism", serving)
+                self.assertIn("args", serving)
+                for platform_entry in recipe["platforms"]:
+                    self.assertIn("stack", platform_entry)
+                    self.assertIn("version", platform_entry)
+                    self.assertIn("overrides", platform_entry)
+                    override_path = root / platform_entry["overrides"]
+                    self.assertTrue(override_path.is_file(), f"Override file missing: {override_path}")
                 self.assertTrue((REPO / "models" / recipe["model_id"] / "model.yaml").is_file())
-                for auxiliary in recipe["deployment"].get("auxiliary_sources", []):
-                    self.assertEqual(yaml.safe_load((root / auxiliary["path"]).read_text())["kind"], auxiliary["kind"])
-                original_documents = list(yaml.safe_load_all((REPO / original).read_text()))
-                self.assertEqual(yaml.safe_load((root / source).read_text()), original_documents[0])
-                if kind == "LeaderWorkerSet":
-                    self.assertEqual(yaml.safe_load((root / "config/service.yaml").read_text()), original_documents[1])
-
-        llmisvc_root = REPO / examples[1][0]
-        prerequisite = "models/glm-5.2/rhoai/3.5/prerequisites/pp-worker-llmisvcconfig.yaml"
-        self.assertEqual(
-            yaml.safe_load((llmisvc_root / "config/pp-worker-llmisvcconfig.yaml").read_text()),
-            yaml.safe_load((REPO / prerequisite).read_text()),
-        )
 
 
 if __name__ == "__main__":

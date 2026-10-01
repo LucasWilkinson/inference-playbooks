@@ -4,9 +4,9 @@
   "title": "Inference Playbook Recipe",
   "type": "object",
   "required": [
-    "schema_version", "recipe_id", "model_id", "platform",
+    "schema_version", "recipe_id", "model_id", "platforms",
     "hardware_profile", "workload_profile", "deployment_mode",
-    "optimization_intent", "maturity", "deployment"
+    "optimization_intent", "maturity", "serving", "deployment"
   ],
   "$defs": {
     "status": {
@@ -33,6 +33,56 @@
           "then": {"required": ["note"]}
         }
       ]
+    },
+    "image_lifecycle": {
+      "type": "object",
+      "required": ["recommended"],
+      "properties": {
+        "recommended": {
+          "type": "object",
+          "required": ["ref", "status"],
+          "properties": {
+            "ref": {"type": "string", "minLength": 1},
+            "status": {"$ref": "#/$defs/status"},
+            "why": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "pin_for_disconnected": {
+          "type": "object",
+          "required": ["digest", "status"],
+          "properties": {
+            "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+            "status": {"$ref": "#/$defs/status"}
+          },
+          "additionalProperties": false
+        },
+        "target": {
+          "type": "object",
+          "description": "The image this recipe should converge to (e.g. RHAIIS image once it ships the required vLLM).",
+          "required": ["ref", "status"],
+          "properties": {
+            "ref": {"type": "string", "minLength": 1},
+            "status": {"$ref": "#/$defs/status"},
+            "why": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "probe_override": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "failure_threshold": {"type": "integer", "minimum": 1},
+        "period_seconds": {"type": "integer", "minimum": 1},
+        "timeout_seconds": {"type": "integer", "minimum": 1},
+        "initial_delay_seconds": {"type": "integer", "minimum": 0},
+        "why": {"type": "string"}
+      },
+      "additionalProperties": false
     },
     "exclude_entry": {
       "type": "object",
@@ -71,11 +121,15 @@
       "properties": {
         "image": {
           "type": "string",
-          "description": "Fully qualified container image reference"
+          "description": "Fully qualified container image reference. Must match image.recommended.ref when the image lifecycle block is present."
         },
         "model": {
           "type": "string",
           "description": "HuggingFace model ID passed to vllm serve"
+        },
+        "served_model_name": {
+          "type": "string",
+          "description": "Model name for the /v1/models endpoint. Passed as --served-model-name to vLLM."
         },
         "parallelism": {
           "type": "object",
@@ -165,6 +219,16 @@
             "additionalProperties": false
           }
         },
+        "probes": {
+          "type": "object",
+          "description": "Override template probe defaults. Only specified fields override; others keep template values.",
+          "properties": {
+            "startup": {"$ref": "#/$defs/probe_override"},
+            "readiness": {"$ref": "#/$defs/probe_override"},
+            "liveness": {"$ref": "#/$defs/probe_override"}
+          },
+          "additionalProperties": false
+        },
         "config_overrides": {
           "type": "boolean",
           "description": "Set true when config/ contains Kustomize overlay patches"
@@ -176,15 +240,25 @@
     }
   },
   "properties": {
-    "schema_version": {"enum": [3, 4]},
+    "schema_version": {"const": 4},
     "recipe_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
     "model_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
-    "platform": {
-      "type": "object",
-      "required": ["stack", "version"],
-      "properties": {
-        "stack": {"enum": ["rhoai", "llm-d", "vllm"]},
-        "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"}
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["stack", "version", "overrides"],
+        "properties": {
+          "stack": {"enum": ["rhoai", "llm-d", "vllm"]},
+          "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "overrides": {"type": "string", "pattern": "^platforms/[^/]+\\.ya?ml$"},
+          "blocked": {"type": "boolean"},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false,
+        "if": {"properties": {"blocked": {"const": true}}, "required": ["blocked"]},
+        "then": {"required": ["stack", "version", "overrides", "reason"]}
       }
     },
     "hardware_profile": {
@@ -204,6 +278,25 @@
       "description": "Catalog label. Use latency or throughput when applicable; custom text is allowed."
     },
     "maturity": {"enum": ["day-zero", "validated", "production"]},
+    "quantization": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Quantization variant name. Must match an entry in models/<model_id>/model.yaml quantizations[].name."
+    },
+    "image": {"$ref": "#/$defs/image_lifecycle"},
+    "features": {
+      "type": "object",
+      "description": "Structured feature claims for catalog filtering. Validator cross-checks against serving.args.",
+      "properties": {
+        "tool_calling": {"type": "boolean"},
+        "speculative_decoding": {"enum": [false, "mtp", "eagle", "draft-model", "ngram"]},
+        "structured_output": {"type": "boolean"},
+        "reasoning_parser": {"type": ["string", "boolean"]},
+        "prefix_caching": {"type": "boolean"},
+        "kv_cache_dtype": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "serving": {"$ref": "#/$defs/serving"},
     "deployment": {
       "type": "object",
@@ -211,33 +304,29 @@
       "properties": {
         "scope": {"enum": ["single-node", "multi-node"]},
         "status": {"$ref": "#/$defs/status"},
-        "components": {
+        "storage": {
           "type": "object",
-          "description": "Named deployment components, each validated by its manifest-specific schema.",
-          "propertyNames": {"pattern": "^[a-z][a-z0-9-]*$"},
-          "additionalProperties": {
-            "oneOf": [
-              {"$ref": "deployment.schema.json"},
-              {"$ref": "llmisvc.schema.json"},
-              {"$ref": "leaderworkerset.schema.json"},
-              {"$ref": "llmd-router.schema.json"}
-            ]
-          },
-          "minProperties": 1
-        },
-        "auxiliary_sources": {
-          "type": "array",
-          "description": "Additional editable manifests needed by the deployment, such as Services or operator configuration.",
-          "items": {
-            "type": "object",
-            "required": ["path", "kind"],
-            "properties": {
-              "path": {"type": "string", "pattern": "^config/.*\\.ya?ml$"},
-              "kind": {"type": "string", "minLength": 1}
+          "description": "Model weight storage configuration for the deployment.",
+          "required": ["type"],
+          "properties": {
+            "type": {"enum": ["pvc", "nfs", "s3", "hostpath"]},
+            "pvc": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "size": {"type": "string", "pattern": "^[0-9]+[KMGTPE]i$"},
+                "access_modes": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany"]}
+                },
+                "storage_class": {"type": "string"}
+              },
+              "additionalProperties": false
             },
-            "additionalProperties": false
+            "why": {"type": "string"}
           },
-          "minItems": 1
+          "additionalProperties": false
         },
         "manifests": {
           "type": "array",
@@ -259,31 +348,13 @@
       "minItems": 1,
       "items": {"type": "string", "pattern": "^results/.+/run\\.yaml$"}
     },
-    "notes": {"type": "string", "pattern": "^guides/.*\\.ya?ml$"},
-    "match": {
-      "type": "object",
-      "not": {"required": ["nodes"]},
-      "description": "Catalog selectors may not contain nodes; use deployment.scope."
-    }
+    "notes": {"type": "string", "pattern": "^guides/.*\\.ya?ml$"}
   },
-  "if": {
-    "required": ["schema_version"],
-    "properties": {"schema_version": {"const": 4}}
-  },
-  "then": {
-    "required": ["serving"]
-  },
-  "else": {
-    "properties": {
-      "deployment": {
-        "required": ["scope", "components"]
-      }
-    }
-  },
+  "additionalProperties": false,
   "allOf": [
     {
       "if": {"properties": {"maturity": {"enum": ["validated", "production"]}}},
-      "then": {"required": ["benchmark_runs"]}
+      "then": {"required": ["benchmark_runs", "image"]}
     }
   ]
 }

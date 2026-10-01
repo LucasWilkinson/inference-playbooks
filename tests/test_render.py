@@ -56,7 +56,7 @@ def make_recipe(
         "schema_version": 4,
         "recipe_id": "gemma-4-tp1-tool-calling",
         "model_id": "gemma-4",
-        "platform": {"stack": stack, "version": version},
+        "platforms": [{"stack": stack, "version": version, "overrides": f"platforms/{stack}-{version}.yaml"}],
         "hardware_profile": "hardware-profiles/h200.yaml",
         "workload_profile": "guidellm-8k1k",
         "deployment_mode": "tp1-tool-calling",
@@ -140,10 +140,11 @@ class BuildContextTests(unittest.TestCase):
         context = build_template_context(recipe, {}, None)
         self.assertEqual(context["gpu_count"], 8)
 
-    def test_dp_replicas(self):
+    def test_dp_gpu_count_and_replicas(self):
         recipe = make_recipe(mode="dp", dp=4)
         context = build_template_context(recipe, {}, None)
-        self.assertEqual(context["replicas"], 4)
+        self.assertEqual(context["replicas"], 1)
+        self.assertEqual(context["gpu_count"], 4)
 
     def test_pp_context_lws(self):
         recipe = make_recipe(mode="tp+pp", tp=8, pp=2)
@@ -233,7 +234,10 @@ class RenderTemplateTests(unittest.TestCase):
         rendered = render_template("vllm/deployment.yaml.j2", context)
         parsed = yaml.safe_load(rendered)
         volumes = parsed["spec"]["template"]["spec"].get("volumes", [])
-        self.assertEqual(len(volumes), 0)
+        volume_names = [v["name"] for v in volumes]
+        self.assertNotIn("dshm", volume_names)
+        self.assertIn("hf-cache", volume_names)
+        self.assertIn("tmp", volume_names)
 
     def test_vllm_deployment_with_env(self):
         recipe = make_recipe(env=[{"name": "NCCL_DEBUG", "value": "INFO"}])
@@ -254,12 +258,15 @@ class RenderTemplateTests(unittest.TestCase):
         self.assertEqual(container["resources"]["requests"]["nvidia.com/gpu"], "4")
         self.assertEqual(container["resources"]["limits"]["nvidia.com/gpu"], "4")
 
-    def test_vllm_deployment_dp_replicas(self):
+    def test_vllm_deployment_dp_gpu_count(self):
         recipe = make_recipe(mode="dp", dp=4)
         context = build_template_context(recipe, {}, None)
         rendered = render_template("vllm/deployment.yaml.j2", context)
         parsed = yaml.safe_load(rendered)
-        self.assertEqual(parsed["spec"]["replicas"], 4)
+        self.assertEqual(parsed["spec"]["replicas"], 1)
+        container = parsed["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["resources"]["requests"]["nvidia.com/gpu"], "4")
+        self.assertIn("--data-parallel-size=4", container["args"])
 
     def test_vllm_deployment_security_context(self):
         recipe = make_recipe()
@@ -350,8 +357,8 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
         import tempfile
         self.tmpdir = Path(tempfile.mkdtemp())
         self.recipe_dir = (
-            self.tmpdir / "models" / "gemma-4" / "vllm" / "v0.24.0"
-            / "recipes" / "h200" / "guidellm-8k1k" / "tp1-tool-calling"
+            self.tmpdir / "models" / "gemma-4"
+            / "recipes" / "h200-tp1-tool-calling"
         )
         self.recipe_dir.mkdir(parents=True)
 
@@ -392,7 +399,7 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
         recipe_path = self._write_recipe(recipe)
         rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=False)
         self.assertFalse(errors, errors)
-        manifest_path = self.recipe_dir / "manifests" / "deployment.yaml"
+        manifest_path = self.recipe_dir / "manifests" / "vllm-v0.24.0" / "deployment.yaml"
         self.assertTrue(manifest_path.is_file())
         content = manifest_path.read_text()
         self.assertIn("kind: Deployment", content)
@@ -421,6 +428,35 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
         rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=True)
         self.assertFalse(errors, errors)
         self.assertIn("kind: LLMInferenceService", rendered)
+
+    def test_render_blocked_platform_skipped(self):
+        from render import render_recipe
+        recipe = make_recipe(tp=1)
+        recipe["platforms"].append({
+            "stack": "rhoai", "version": "3.5",
+            "overrides": "platforms/rhoai-3.5.yaml",
+            "blocked": True,
+            "reason": "Flag not supported",
+        })
+        recipe_path = self._write_recipe(recipe)
+        rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=True)
+        self.assertFalse(errors, errors)
+        self.assertIn("kind: Deployment", rendered)
+        self.assertNotIn("LLMInferenceService", rendered)
+
+    def test_render_all_blocked_produces_no_output(self):
+        from render import render_recipe
+        recipe = make_recipe(tp=1)
+        recipe["platforms"] = [{
+            "stack": "vllm", "version": "v0.24.0",
+            "overrides": "platforms/vllm-v0.24.0.yaml",
+            "blocked": True,
+            "reason": "Temporary block",
+        }]
+        recipe_path = self._write_recipe(recipe)
+        rendered, errors = render_recipe(self.tmpdir, recipe_path, dry_run=True)
+        self.assertFalse(errors, errors)
+        self.assertEqual(rendered, "")
 
 
 if __name__ == "__main__":

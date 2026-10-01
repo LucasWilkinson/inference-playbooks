@@ -29,27 +29,11 @@ def make_validator():
 
 
 class RecipeV4SchemaTests(unittest.TestCase):
-    """Test JSON Schema validation for v3 backward compatibility and v4 serving block."""
+    """Test JSON Schema validation for v4 serving block."""
 
     def setUp(self):
         self.schema = load_schema()
         self.validator = make_validator()
-
-        self.v3_recipe = {
-            "schema_version": 3,
-            "recipe_id": "glm-guidellm-tp8",
-            "model_id": "glm",
-            "platform": {"stack": "rhoai", "version": "3.5"},
-            "hardware_profile": "hardware-profiles/h200-r1.yaml",
-            "workload_profile": "guidellm-8k1k",
-            "deployment_mode": "tp8-aggregated",
-            "optimization_intent": "latency",
-            "maturity": "day-zero",
-            "deployment": {
-                "scope": "single-node",
-                "components": {"modelserver": {"kind": "Deployment", "source": "config/modelserver.yaml"}},
-            },
-        }
 
         self.v4_serving = {
             "image": "vllm/vllm-openai:v0.24.0",
@@ -68,7 +52,7 @@ class RecipeV4SchemaTests(unittest.TestCase):
             "schema_version": 4,
             "recipe_id": "gemma-4-tp1-tool-calling",
             "model_id": "gemma-4",
-            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "platforms": [{"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"}],
             "hardware_profile": "hardware-profiles/nvidia-h200-sxm-8x-nvlink-r1.yaml",
             "workload_profile": "guidellm-8k1k",
             "deployment_mode": "tp1-tool-calling",
@@ -80,22 +64,6 @@ class RecipeV4SchemaTests(unittest.TestCase):
 
     def errors_for(self, recipe):
         return list(self.validator.iter_errors(recipe))
-
-    # --- Backward compatibility ---
-
-    def test_v3_recipe_still_validates(self):
-        errors = self.errors_for(self.v3_recipe)
-        self.assertFalse(errors, [e.message for e in errors])
-
-    def test_v3_recipe_with_custom_intent_validates(self):
-        recipe = {**self.v3_recipe, "optimization_intent": "lowest cost at 128K context"}
-        errors = self.errors_for(recipe)
-        self.assertFalse(errors, [e.message for e in errors])
-
-    def test_v3_recipe_missing_scope_fails(self):
-        recipe = {**self.v3_recipe, "deployment": {}}
-        errors = self.errors_for(recipe)
-        self.assertTrue(errors)
 
     # --- v4 basic validation ---
 
@@ -112,8 +80,52 @@ class RecipeV4SchemaTests(unittest.TestCase):
             f"Expected 'serving' in error messages: {[e.message for e in errors]}",
         )
 
+    def test_v4_recipe_missing_platforms_fails(self):
+        recipe = {k: v for k, v in self.v4_recipe.items() if k != "platforms"}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
     def test_v4_recipe_with_empty_serving_fails(self):
         recipe = {**self.v4_recipe, "serving": {}}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    # --- v4 platforms ---
+
+    def test_v4_multi_platform_validates(self):
+        recipe = {**self.v4_recipe, "platforms": [
+            {"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"},
+            {"stack": "rhoai", "version": "3.5", "overrides": "platforms/rhoai-3.5.yaml"},
+        ]}
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_platform_missing_overrides_fails(self):
+        recipe = {**self.v4_recipe, "platforms": [
+            {"stack": "vllm", "version": "v0.24.0"},
+        ]}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_empty_platforms_fails(self):
+        recipe = {**self.v4_recipe, "platforms": []}
+        errors = self.errors_for(recipe)
+        self.assertTrue(errors)
+
+    def test_v4_blocked_platform_with_reason_validates(self):
+        recipe = {**self.v4_recipe, "platforms": [
+            {"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"},
+            {"stack": "rhoai", "version": "3.5", "overrides": "platforms/rhoai-3.5.yaml",
+             "blocked": True, "reason": "RHOAI 3.5 lacks --enable-auto-tool-choice"},
+        ]}
+        errors = self.errors_for(recipe)
+        self.assertFalse(errors, [e.message for e in errors])
+
+    def test_v4_blocked_platform_without_reason_fails(self):
+        recipe = {**self.v4_recipe, "platforms": [
+            {"stack": "rhoai", "version": "3.5", "overrides": "platforms/rhoai-3.5.yaml",
+             "blocked": True},
+        ]}
         errors = self.errors_for(recipe)
         self.assertTrue(errors)
 
@@ -280,15 +292,14 @@ class RecipeV4ValidatorTests(unittest.TestCase):
             self.tmpdir
             / "models"
             / "gemma-4"
-            / "vllm"
-            / "v0.24.0"
             / "recipes"
-            / "h200"
-            / "guidellm-8k1k"
-            / "tp1-tool-calling"
+            / "h200-tp1-tool-calling"
         )
         self.recipe_dir.mkdir(parents=True)
         self.recipe_path = self.recipe_dir / "recipe.yaml"
+        platforms_dir = self.recipe_dir / "platforms"
+        platforms_dir.mkdir()
+        (platforms_dir / "vllm-v0.24.0.yaml").write_text("{}\n")
 
     def make_recipe(self, serving_overrides=None):
         serving = {**self.base_serving}
@@ -298,7 +309,7 @@ class RecipeV4ValidatorTests(unittest.TestCase):
             "schema_version": 4,
             "recipe_id": "gemma-4-tp1-tool-calling",
             "model_id": "gemma-4",
-            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "platforms": [{"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"}],
             "hardware_profile": "hardware-profiles/h200.yaml",
             "workload_profile": "guidellm-8k1k",
             "deployment_mode": "tp1-tool-calling",
@@ -473,6 +484,29 @@ class RecipeV4ValidatorTests(unittest.TestCase):
         errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
         self.assertFalse(errors, errors)
 
+    # --- Platform override validation ---
+
+    def test_override_file_missing_fails(self):
+        recipe = self.make_recipe()
+        recipe["platforms"] = [{"stack": "rhoai", "version": "3.5", "overrides": "platforms/rhoai-3.5.yaml"}]
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertTrue(any("override file does not exist" in e for e in errors))
+
+    def test_override_file_valid_passes(self):
+        platforms_dir = self.recipe_dir / "platforms"
+        platforms_dir.mkdir(parents=True, exist_ok=True)
+        (platforms_dir / "vllm-v0.24.0.yaml").write_text("{}\n")
+
+        schema_dir = self.tmpdir / "schema"
+        schema_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        for f in (REPO / "schema").glob("*.schema.json"):
+            shutil.copy2(f, schema_dir)
+
+        recipe = self.make_recipe()
+        errors = validate_v4_recipe(self.tmpdir, self.recipe_path, recipe)
+        self.assertFalse(errors, errors)
+
 
 class RecipeV4RoleBlockTests(unittest.TestCase):
     """Test role block (decode/prefill) validation and arg resolution."""
@@ -496,15 +530,14 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
             self.tmpdir
             / "models"
             / "gemma-4"
-            / "vllm"
-            / "v0.24.0"
             / "recipes"
-            / "h200"
-            / "guidellm-8k1k"
-            / "tp8-aggregated"
+            / "h200-tp8-aggregated"
         )
         self.recipe_dir.mkdir(parents=True)
         self.recipe_path = self.recipe_dir / "recipe.yaml"
+        platforms_dir = self.recipe_dir / "platforms"
+        platforms_dir.mkdir()
+        (platforms_dir / "vllm-v0.24.0.yaml").write_text("{}\n")
 
     def errors_for(self, recipe):
         return list(self.validator.iter_errors(recipe))
@@ -517,7 +550,7 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
             "schema_version": 4,
             "recipe_id": "gemma-4-tp8-pd",
             "model_id": "gemma-4",
-            "platform": {"stack": "vllm", "version": "v0.24.0"},
+            "platforms": [{"stack": "vllm", "version": "v0.24.0", "overrides": "platforms/vllm-v0.24.0.yaml"}],
             "hardware_profile": "hardware-profiles/h200.yaml",
             "workload_profile": "guidellm-8k1k",
             "deployment_mode": "tp8-aggregated",
@@ -530,7 +563,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- Schema validation of role blocks ---
 
     def test_decode_args_validates(self):
-        """Recipe with decode.args validates against JSON Schema."""
         recipe = self.make_recipe({
             "decode": {
                 "args": [
@@ -542,7 +574,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertFalse(errors, [e.message for e in errors])
 
     def test_prefill_args_validates(self):
-        """Recipe with prefill.args validates against JSON Schema."""
         recipe = self.make_recipe({
             "router": {"strategy": "prefix"},
             "prefill": {
@@ -557,7 +588,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- Exclude validation ---
 
     def test_exclude_valid_flag_validates(self):
-        """Exclude referencing an existing serving.args flag passes."""
         recipe = self.make_recipe({
             "decode": {
                 "exclude": [
@@ -569,7 +599,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertFalse(errors, errors)
 
     def test_exclude_dead_flag_fails(self):
-        """Exclude referencing a flag not in serving.args produces an error."""
         recipe = self.make_recipe({
             "decode": {
                 "exclude": [
@@ -584,7 +613,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- Flag overlap ---
 
     def test_duplicate_flag_in_serving_and_role_args_fails(self):
-        """Same flag in serving.args and role.args without exclude is rejected."""
         recipe = self.make_recipe({
             "decode": {
                 "args": [
@@ -597,7 +625,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertTrue(any("--max-model-len" in e and "without an exclude" in e for e in errors))
 
     def test_exclude_then_readd_in_role_args_validates(self):
-        """Exclude a flag from universal and re-add it in role.args with different value."""
         recipe = self.make_recipe({
             "decode": {
                 "exclude": [
@@ -614,7 +641,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- Leader/worker conflicts ---
 
     def test_leader_worker_same_flag_fails(self):
-        """Same flag in both leader_args and worker_args for a role is rejected."""
         recipe = self.make_recipe({
             "decode": {
                 "leader_args": [
@@ -630,7 +656,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertTrue(any("--some-flag" in e and "leader_args" in e and "worker_args" in e for e in errors))
 
     def test_duplicate_flag_in_role_args_fails(self):
-        """Duplicate flag within role.args is rejected."""
         recipe = self.make_recipe({
             "decode": {
                 "args": [
@@ -646,7 +671,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- Prefill requires P/D mode ---
 
     def test_prefill_without_pd_strategy_fails(self):
-        """Prefill block without a P/D router strategy produces an error."""
         recipe = self.make_recipe({
             "prefill": {
                 "args": [
@@ -659,7 +683,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertTrue(any("P/D router strategy" in e for e in errors))
 
     def test_prefill_with_pd_strategy_validates(self):
-        """Prefill block with a valid P/D router strategy passes."""
         recipe = self.make_recipe({
             "router": {"strategy": "prefix"},
             "prefill": {
@@ -674,7 +697,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
     # --- resolve_role_args ---
 
     def test_resolve_role_args_basic(self):
-        """Resolution without role blocks returns serving.args unchanged."""
         serving = {
             "args": [
                 {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
@@ -687,7 +709,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertEqual(result[1]["flag"], "--enable-prefix-caching")
 
     def test_resolve_role_args_with_exclude(self):
-        """Excluded flag is removed from the resolved list."""
         serving = {
             "args": [
                 {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
@@ -706,7 +727,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_resolve_role_args_with_role_args(self):
-        """Role-specific args are appended after universal args."""
         serving = {
             "args": [
                 {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},
@@ -722,7 +742,6 @@ class RecipeV4RoleBlockTests(unittest.TestCase):
         self.assertEqual(flags, ["--max-model-len", "--decode-flag"])
 
     def test_resolve_role_args_leader_vs_worker(self):
-        """Leader and worker positions produce different resolved arg lists."""
         serving = {
             "args": [
                 {"flag": "--max-model-len", "value": "16384", "required": True, "why": "Memory."},

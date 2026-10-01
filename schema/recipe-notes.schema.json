@@ -94,15 +94,7 @@
     },
     "features": {
       "type": "object",
-      "properties": {
-        "tool_calling": {"type": "boolean"},
-        "speculative_decoding": {"enum": [false, "mtp", "eagle", "draft-model", "ngram"]},
-        "structured_output": {"type": "boolean"},
-        "reasoning_parser": {"type": ["string", "boolean"]},
-        "prefix_caching": {"type": "boolean"},
-        "kv_cache_dtype": {"type": "string"}
-      },
-      "additionalProperties": false
+      "additionalProperties": {"type": "boolean"}
     },
     "quickstart": {
       "type": "array",
