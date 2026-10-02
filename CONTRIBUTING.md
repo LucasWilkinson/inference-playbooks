@@ -235,11 +235,12 @@ supported and will not pass validation. To migrate a v3 recipe:
 5. Remove `deployment.components` and `deployment.auxiliary_sources`.
 6. Run `python3 tools/validate.py --current` to verify.
 
-See the [design document](docs/design-recipe-v4.md) for detailed migration
-guidance.
+See [schema/CHANGELOG.md](schema/CHANGELOG.md) for the full list of v4
+schema changes.
 
-## Contributor contract
+## Repository rules
 
-See [AGENTS.md](AGENTS.md) for the full contributor contract covering
-repository layout, ownership, hardware profiles, benchmark evidence,
-and validation rules.
+[AGENTS.md](AGENTS.md) documents repository conventions enforced by CI
+and tooling: layout structure, file ownership, hardware profile
+immutability, benchmark evidence requirements, and validation rules.
+These apply to all contributions regardless of author.
