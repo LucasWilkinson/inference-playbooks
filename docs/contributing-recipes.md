@@ -138,9 +138,86 @@ The v3 schema is no longer supported. Recipes with `schema_version: 3` or
 `deployment.components` must be migrated to v4 before they can pass validation.
 See the [design document](design-recipe-v4.md) for migration details.
 
-## Initial-release option: submit raw manifests
+## Quick path: submit raw manifests
 
-For the initial release, a contributor may open a PR with only raw YAML/JSON
-inputs under a leaf's `raw-manifest/`, without authoring `recipe.yaml`.
-Thibrahi or Saketh will convert the submission before merge. This intake
-exception is temporary and ends after the initial release.
+If you have a working deployment but not the bandwidth for a full v4 recipe,
+submit your manifests directly. A maintainer will convert the submission to
+a v4 recipe before merge.
+
+### What to submit
+
+Create a directory under the target model and open a PR:
+
+```text
+models/<model-id>/recipes/<recipe-id>/
+  raw-manifest/
+    deployment.yaml          # your working K8s manifest(s)
+    service.yaml             # optional supporting manifests
+    README.md                # optional notes
+```
+
+Use the same `<recipe-id>` convention as full recipes (e.g.,
+`h200-x8-tp8-aggregated-8k1k`). If unsure, use a descriptive name and
+a maintainer will adjust it.
+
+### Required information
+
+Include the following in your PR description or in
+`raw-manifest/README.md`:
+
+- **Model**: HuggingFace model ID or name
+- **Stack and version**: which serving stack and version (e.g., vLLM v0.24.0,
+  RHOAI 3.5, llm-d 0.8)
+- **Hardware**: GPU type, count, and any topology details
+  (e.g., 8x H200 SXM, NVLink)
+- **Workload**: which benchmark workload this targets, if any
+  (e.g., `guidellm-8k1k`, `aiperf-agentx-128k`)
+- **Deployment pattern**: parallelism mode (TP, PP, TP+PP, DP) and node
+  scope (single-node or multi-node)
+- **Container image**: fully qualified image reference
+- **Known prerequisites**: secrets, PVCs, operators, or cluster
+  configuration needed to deploy
+
+Mark anything uncertain with "needs review" — maintainers will verify
+during conversion.
+
+### What CI checks
+
+CI validates raw-manifest submissions for:
+
+- YAML/JSON syntax (no parse errors)
+- No duplicate keys in YAML documents
+- Directory is under `models/<model-id>/recipes/<recipe-id>/raw-manifest/`
+
+CI does **not** require `recipe.yaml` or schema validation for raw-only
+PRs. Those checks run after a maintainer adds the converted recipe.
+
+### Example PR description
+
+```
+## Raw manifest submission
+
+**Model**: RedHatAI/GLM-5.2-FP8-dynamic
+**Stack**: vLLM v0.23.0
+**Hardware**: 8x NVIDIA H200 SXM (IBMCloud gx3d-160x1792x8h200)
+**Workload**: aiperf-agentx-128k
+**Deployment**: PP2+TP8, multi-node (LeaderWorkerSet)
+**Image**: docker.io/vllm/vllm-openai:v0.23.0
+
+### Prerequisites
+- `hf-token` Secret with HuggingFace token
+- PVC with model weights mounted at /mnt/models
+- 2 nodes with 8 GPUs each
+
+### Notes
+- Startup takes ~12 min for cold model load
+- Needs `--trust-remote-code` for model loading
+```
+
+### What happens next
+
+1. A maintainer converts the raw manifest to a v4 `recipe.yaml` with
+   `serving` block and `platforms` entry in the same PR.
+2. CI runs full schema validation and template rendering.
+3. The raw manifest is retained in `raw-manifest/` for reference.
+4. After conversion, `recipe.yaml` and `manifests/` are authoritative.
