@@ -1,11 +1,12 @@
 # Inference Playbooks
 
-Inference Playbooks is a curated, reproducible collection of deployment recipes
-for serving large language models on OpenShift/Kubernetes with GPU accelerators.
-Each playbook connects a model, serving stack, hardware profile, workload,
-deployment configuration, and—when available—auditable benchmark evidence. It
-helps operators select, deploy, validate, and compare practical inference
-configurations rather than treat manifests or benchmark numbers in isolation.
+Inference Playbooks is a curated, reproducible collection of deployment
+recipes for serving large language models on OpenShift/Kubernetes with GPU
+accelerators. Each playbook connects a model, serving stack, hardware
+profile, workload, deployment configuration, and — when available —
+auditable benchmark evidence. It helps operators select, deploy, validate,
+and compare practical inference configurations rather than treat manifests
+or benchmark numbers in isolation.
 
 ## Supported Accelerators
 
@@ -15,97 +16,145 @@ configurations rather than treat manifests or benchmark numbers in isolation.
 
 ## Target Workloads
 
-Reusable benchmark Jobs live in [`benchmarks/manifests/`](benchmarks/manifests/).
-Set the `ENDPOINT`, `MODEL`, and `TOKENIZER` environment values in each manifest
-before applying it in the same namespace as the target Service.
+Reusable benchmark Jobs live in
+[`benchmarks/manifests/`](benchmarks/manifests/). Set the `ENDPOINT`,
+`MODEL`, and `TOKENIZER` environment values in each manifest before
+applying it in the same namespace as the target Service.
 
-- [GuideLLM 8K/1K](benchmarks/manifests/guidellm-8k1k-job.yaml) — synthetic
-  8,000-input / 1,000-output requests at concurrent streams 1, 4, 16, 32, 64,
-  and 128.
-- [AIPerf AgentX 128K](benchmarks/manifests/aiperf-agentx-128k-job.yaml) —
-  long-context, multi-turn agentic trace replay filtered to 128K contexts.
-- [AIPerf AgentX unlimited context](benchmarks/manifests/aiperf-agentx-unlimited-context-job.yaml)
-  — the same replay without context filtering; requires an endpoint that can
-  accept every request in the trace corpus.
+- [GuideLLM 8K/1K](benchmarks/manifests/guidellm-8k1k-job.yaml) —
+  synthetic 8 000-input / 1 000-output requests at concurrent streams
+  1, 4, 16, 32, 64, and 128.
+- [AIPerf AgentX 128K](benchmarks/manifests/aiperf-agentx-128k-job.yaml)
+  — long-context, multi-turn agentic trace replay filtered to
+  128K contexts.
+- [AIPerf AgentX unlimited context][agentx-unlimited] — the same replay
+  without context filtering; requires an endpoint that can accept every
+  request in the trace corpus.
 
-Model playbooks may add benchmark manifests beside a topology only when the
-workload is specific to that model, framework, or deployment shape.
+[agentx-unlimited]: benchmarks/manifests/aiperf-agentx-unlimited-context-job.yaml
+
+Model playbooks may add benchmark manifests beside a topology only when
+the workload is specific to that model, framework, or deployment shape.
 
 ## Models
 
-| Model | Frameworks | Start Here |
-|-------|------------|------------|
-| GLM-5.2-FP8 | [vLLM (v0.23.0)](models/glm-5.2/vllm/v0.23.0/) · [RHOAI (3.5)](models/glm-5.2/rhoai/3.5/) | [vLLM guides](models/glm-5.2/vllm/v0.23.0/README.md) · [RHOAI guides](models/glm-5.2/rhoai/3.5/README.md) |
-| GLM-5 / GLM-5-FP8 | [vLLM (latest)](models/glm-5/vllm/latest/) | [Model Ops](models/glm-5/model-ops/) |
-| Gemma-4-26B-A4B-FP8 | [vLLM (v0.24.0)](models/gemma-4/vllm/v0.24.0/) | [Deployment Guides](models/gemma-4/vllm/v0.24.0/README.md) |
+| Model              | Frameworks                                                                                              | Start Here                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| GLM-5.2-FP8        | [vLLM (v0.23.0)](models/glm-5.2/vllm/v0.23.0/) · [RHOAI (3.5)](models/glm-5.2/rhoai/3.5/)             | [vLLM guides](models/glm-5.2/vllm/v0.23.0/README.md) · [RHOAI guides](models/glm-5.2/rhoai/3.5/README.md) |
+| GLM-5 / GLM-5-FP8  | [vLLM (latest)](models/glm-5/vllm/latest/)                                                             | [Model Ops](models/glm-5/model-ops/)                                                                    |
+| Gemma-4-26B-A4B-FP8| [vLLM (v0.24.0)](models/gemma-4/vllm/v0.24.0/)                                                         | [Deployment Guides](models/gemma-4/vllm/v0.24.0/README.md)                                              |
 
-## Recipe v3 layout
+## Recipe Layout
 
-```
+```text
 hardware-profiles/
   <hardware-profile>.yaml
+
 models/<model-id>/
   model.yaml
   <stack>/<stack-version>/
     model-ops/
     recipes/<hardware-profile>/<workload-profile>/<deployment-mode>[--<suffix>]/
       recipe.yaml
-      manifests/
+      config/              # v4: optional Kustomize overlay; v3: required source manifests
+      manifests/           # v4: generated by render.py; v3: hand-authored
       guides/
       benchmarks/
       results/
 ```
 
-- `<stack>` is a serving stack such as `vllm`, `rhoai`, or `llm-d`; the version
-  is part of that stack context.
-- `<workload-profile>` is one of `guidellm-8k1k`, `aiperf-agentx-128k`, or
-  `aiperf-agentx-unlimited-context`.
-- `<deployment-mode>` names the configuration pattern, such as
-  `tp8-aggregated`, `tp8-replicas-2`, or `pp2-tp8`. Add `--<suffix>` only when
-  more than one recipe shares that deployment mode.
-- `recipe.yaml` explicitly names its root-level hardware profile. The path is a
-  navigation selector, not a source of hardware facts.
-- `deployment.scope` is always `single-node` or `multi-node`; `match.nodes` is
-  retired. `optimization_intent` is catalog metadata, not a path level, and may
-  be a custom concise label.
+### Recipe v4 (recommended)
 
-Hardware profiles contain accelerator, host-topology, and applicable network
-facts together. They are stable but corrigible: a factual correction increments
-`profile_revision` and adds a correction-log entry. Changing accelerator type
-or count requires a new profile, while `accelerator_key` supports comparisons
-across different hosts with the same accelerator type/count.
+Recipe v4 uses a `serving` block — contributors define image, model,
+parallelism, and annotated args. Templates generate Kubernetes manifests.
+No hand-authored `config/` needed unless custom overrides are required
+(Kustomize patches via `config_overrides: true`).
 
-See [the recipe-evidence guide](docs/recipe-evidence.md) for evidence and
-profile rules, and [AGENTS.md](AGENTS.md) for the full contributor contract.
+```bash
+python3 tools/render.py models/.../recipe.yaml   # generate manifests
+```
+
+See [docs/contributing-recipes.md](docs/contributing-recipes.md) and
+[schema/examples/recipe-v4-example.yaml](schema/examples/recipe-v4-example.yaml).
+
+### Recipe v3 (legacy)
+
+Existing v3 recipes (`schema_version: 3`) use `deployment.components`
+referencing hand-authored manifests in `config/`. They continue to
+validate unchanged. New recipes should use v4.
+
+### Path segments
+
+- **`<stack>`** — a serving stack: `vllm`, `rhoai`, or `llm-d`. The
+  version is part of that stack context.
+- **`<workload-profile>`** — one of `guidellm-8k1k`,
+  `aiperf-agentx-128k`, or `aiperf-agentx-unlimited-context`.
+- **`<deployment-mode>`** — the configuration pattern, such as
+  `tp8-aggregated`, `tp8-replicas-2`, or `pp2-tp8`. Add `--<suffix>`
+  only when more than one recipe shares that deployment mode.
+
+### Key conventions
+
+- `recipe.yaml` explicitly names its root-level hardware profile. The
+  path is a navigation selector, not a source of hardware facts.
+- `deployment.scope` is always `single-node` or `multi-node`.
+  `optimization_intent` is catalog metadata, not a path level.
+- Optional `notes: guides/notes.yaml` links reader-facing context and
+  reasons for deployment choices; see the
+  [notes example](schema/examples/recipe-notes.yaml).
+
+### Day-zero examples
+
+- [v4 example](schema/examples/recipe-v4-example.yaml) — Recipe v4 with serving block
+- [Deployment](models/gemma-4/vllm/v0.24.0/recipes/nvidia-h200-x8/guidellm-8k1k/mtp-single-gpu/recipe.yaml) — v3 with full source manifest
+- [LLMInferenceService](models/glm-5.2/rhoai/3.5/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml) — v3 RHOAI
+- [LeaderWorkerSet](models/glm-5.2/vllm/v0.23.0/recipes/ibmcloud-h200-gx3d-160x1792x8h200/aiperf-agentx-128k/pp2-tp8/recipe.yaml) — v3 vLLM LWS
+
+See the [contribution guide](docs/contributing-recipes.md) for the full flow.
+
+### Hardware profiles
+
+Hardware profiles contain accelerator, host-topology, and applicable
+network facts together. They are stable but corrigible: a factual
+correction increments `profile_revision` and adds a correction-log entry.
+Changing accelerator type or count requires a new profile, while
+`accelerator_key` supports comparisons across different hosts with the
+same accelerator type/count.
+
+See [the recipe-evidence guide](docs/recipe-evidence.md) for evidence
+and profile rules, [the recipe contribution guide](docs/contributing-recipes.md)
+for the creation and review flow, and [AGENTS.md](AGENTS.md) for the
+full contributor contract.
 
 ## Validation
 
-Install the local validation dependencies and validate repository content:
+Install the local validation dependencies and validate repository
+content:
 
 ```bash
 python3 -m pip install -r tools/requirements.txt
 python3 tools/validate.py --current
 ```
 
-CI validates profile corrections and calculates only the recipes affected by a
-change. A corrected hardware profile selects just recipes that explicitly
-reference it; schema, validator, renderer, or workflow changes select all
-recipes. README rendering and catalog generation will be enabled when the
-renderer lands.
+CI validates profile corrections and calculates only the recipes
+affected by a change. A corrected hardware profile selects just recipes
+that explicitly reference it; schema, validator, renderer, or workflow
+changes select all recipes. README rendering and catalog generation will
+be enabled when the renderer lands.
 
-## Current status
+## Current Status
 
-- Existing deployment guides and manifests remain in the legacy topology-based
-  layout; new playbooks use the Recipe v3 evidence structure above.
+- Recipe v4 schema, serving block, role blocks, flag constraints,
+  template renderer (`tools/render.py`), and Jinja2 templates for vllm
+  and RHOAI are available.
 - Recipe v3 schemas, immutable hardware profiles, evidence validation,
-  affected-recipe selection, and reusable benchmark workloads are available on
-  `main`.
-- Migration of existing playbooks, README rendering, and catalog generation are
-  follow-up work.
+  affected-recipe selection, and reusable benchmark workloads remain
+  supported. Existing v3 recipes validate unchanged.
+- Three day-zero v3 recipes demonstrate Deployment, LLMI, and LWS modes.
+  New recipes should use v4.
 
 ## Planned
 
-- **llm-d** — prefix-cache-aware routing, P/D disaggregation, KV tiering
-
-Existing content under these frameworks uses the legacy `<version>/<topology>/`
-layout. Add new playbooks using the Recipe v3 layout above.
+- **llm-d templates** — prefix-cache-aware routing, P/D disaggregation
+- **Catalog generation** — aggregate validated recipes into browsable index
+- **README rendering** — generated per-recipe summaries from recipe data

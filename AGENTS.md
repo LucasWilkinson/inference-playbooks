@@ -11,6 +11,11 @@ pull request. A direct push is permitted only as a break-glass response with
 explicit approval from a repository owner; record the approval and reason in
 the resulting commit or incident record.
 
+## Container images
+
+Use fully qualified container image references; never use a short image name.
+Use a maintained upstream image appropriate for the workload.
+
 ## Repository layout
 
 Use this hierarchy for new model playbooks:
@@ -18,46 +23,45 @@ Use this hierarchy for new model playbooks:
 ```text
 schema/
   recipe.schema.json
+  platform-overrides.schema.json
   model.schema.json
   CHANGELOG.md
 hardware-profiles/
   <hardware-profile>.yaml
 models/<model-id>/
   model.yaml
-  <stack>/<stack-version>/
-    model-ops/
-    recipes/<hardware-profile>/
-      <workload-profile>/
-        <deployment-mode>[--<suffix>]/
-          recipe.yaml
-          manifests/
-          guides/
-          benchmarks/
-          results/
+  recipes/<recipe-id>/
+    recipe.yaml
+    platforms/
+      <stack>-<version>.yaml   # per-platform override files
+    raw-manifest/              # initial-release intake, when used
+    config/
+    manifests/
+      <stack>-<version>/       # generated per platform
+    guides/
+    benchmarks/
+    results/
 catalog/
 tools/
 .github/workflows/
 ```
 
-`<stack>` is a serving stack such as `rhoai` or `llm-d`. `<stack-version>` is
-the version the recipe targets (for example, `3.5`). Do not place RHOAI- or
-llm-d-specific model operations directly under the model root: downstream
-framework limitations are part of the stack/version context.
+`<recipe-id>` encodes hardware and deployment context as a prefix, such as
+`h200-x8-pp2-tp8-agentx-128k` or `h200-x8-mtp-single-gpu-8k1k`. Stack,
+version, hardware, and workload are no longer path segments — they are fields
+in `recipe.yaml`.
 
-`<hardware-profile>` is a normalized, lowercase, hyphenated identifier such as
-`h200-sxm8` or `mi300x-8gpu`. In a recipe path it is a navigation selector, not
-the source of physical facts. Each `recipe.yaml` must explicitly reference the
-matching root-level `hardware-profiles/<hardware-profile>.yaml`.
-`<workload-profile>` is one of the reusable benchmark workloads from PR #7:
-`guidellm-8k1k`, `aiperf-agentx-128k`, or
-`aiperf-agentx-unlimited-context`. `<deployment-mode>` identifies the
-configuration pattern, such as `tp8-aggregated`, `tp8-replicas-2`, or
-`pp2-tp8`. A suffix is allowed only when more than one recipe shares the same
-deployment mode (for example, `tp8-aggregated--prefix-cache-off`).
+Each `recipe.yaml` declares a `platforms` array with one or more entries.
+Each platform entry specifies `stack`, `version`, and `overrides` (path to a
+file under `platforms/`). Override files are validated against
+`platform-overrides.schema.json`. A platform with no customizations uses an
+empty override file.
 
-Recipe v3 requires `deployment.scope` to be either `single-node` or
-`multi-node`. `match.nodes` is retired; do not reintroduce it as a second node
-scope field.
+Each `recipe.yaml` must explicitly reference the matching root-level
+`hardware-profiles/<hardware-profile>.yaml`.
+
+Recipe v4 requires `deployment.scope` to be either `single-node` or
+`multi-node`.
 
 Each recipe declares `optimization_intent` as a concise catalog label.
 `latency` and `throughput` are the standard values, but a recipe creator may
@@ -67,6 +71,16 @@ same intent.
 
 ## Ownership and source of truth
 
+For the initial release only, a contributor may open a PR containing raw YAML
+or JSON manifests under a leaf's `raw-manifest/` without creating
+`recipe.yaml`. The PR should identify the model, stack/version, hardware,
+workload, deployment pattern, and known prerequisites; uncertain details may
+be called out for review. Thibrahi or Saketh converts the submission in the
+same PR before merge. CI checks raw syntax and duplicate keys on submission,
+then requires a sibling `recipe.yaml` and full validation before merge. Do not
+require raw-only contributors to author notes, benchmark results, or generated
+files. This exception ends after the initial release.
+
 - `models/<model-id>/model.yaml` owns model identity and model-wide metadata:
   family, parameter count, Hugging Face identifier, license/access
   requirements, and available quantizations.
@@ -74,16 +88,32 @@ same intent.
   applicable network/interconnect facts. Keep GPU model/count/memory,
   topology, host requirements, and any RDMA/RoCE/DRA/SR-IOV configuration
   together.
-- `recipe.yaml` owns the workload-specific serving configuration, compatibility
-  claim, references to manifests/benchmark runs, and display-safe summary.
+- `recipe.yaml` owns the workload-specific serving configuration via the
+  `serving` block (image, model, parallelism, args, env, resources, port),
+  multi-platform targeting via `platforms`, and references to
+  manifests/benchmark runs.
+- `platforms/` contains per-platform override files referenced by
+  `platforms[].overrides`. Override merge: image/resources/router replace,
+  env appends, args merge by flag. Templates derive the K8s component kind
+  from `(platform.stack, parallelism.mode)`.
+- `config/` contains optional Kustomize overlay patches when
+  `serving.config_overrides` is true.
+- `raw-manifest/` preserves the initial submitted inputs for maintainer
+  conversion. It may contain multi-document YAML or JSON and an optional
+  README. After conversion, `config/` and `recipe.yaml` are authoritative.
 - `manifests/` contains generated deployment artifacts. Do not hand-edit them;
-  change recipe inputs and run the renderer.
+  change recipe inputs in `recipe.yaml` or `config/` and run the renderer.
 - `benchmarks/` contains reproducible harness inputs, workload definitions, and
   trace references. `results/` contains sanitized raw run artifacts and their
   parser-generated normalized results.
 - `guides/` contains explanatory prose. It may embed generated tables, but it
   must link to the underlying recipe, manifest, and evidence rather than copy
-  mutable values.
+  mutable values. Optional `guides/notes.yaml` holds catalog presentation,
+  decision rationale, intentional omissions, image-choice status, feature
+  claims, quickstart steps, insights, known issues, and sizing pointers. Recipe
+  `notes` references it. Display specs point to source fields rather than copy
+  mutable values. A manifest import may leave rationale fields empty; do not
+  invent explanations or evidence.
 - `catalog/` is generated output and must not be hand-edited.
 
 ## Immutable hardware profiles
@@ -144,6 +174,12 @@ and immutable checksum plus a durable external location.
 revisions, and required benchmark provenance. `tools/render.py` renders
 manifests, recipe READMEs, and catalog outputs. `tools/doctor.py` performs
 configuration linting.
+
+For raw intake, local `tools/validate.py --current` checks syntax and layout
+without requiring a recipe. CI uses `--require-converted-raw`, so a raw-only PR
+cannot merge until maintainer conversion and normal recipe validation pass.
+Raw-only leaves are not rendered; once `recipe.yaml` is added, normal
+affected-recipe selection applies.
 
 CI and pre-commit must run the same local commands. CI should calculate the
 affected recipe set from the diff:
