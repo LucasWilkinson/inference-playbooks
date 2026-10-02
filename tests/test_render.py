@@ -380,6 +380,12 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
             "architectures": ["Gemma4ForConditionalGeneration"],
         }))
 
+        platforms_dir = self.recipe_dir / "platforms"
+        platforms_dir.mkdir()
+        (platforms_dir / "vllm-v0.24.0.yaml").write_text("{}\n")
+        (platforms_dir / "rhoai-3.5.yaml").write_text("{}\n")
+        (platforms_dir / "llm-d-0.8.yaml").write_text("{}\n")
+
     def _write_recipe(self, recipe):
         recipe_path = self.recipe_dir / "recipe.yaml"
         recipe_path.write_text(yaml.dump(recipe, default_flow_style=False))

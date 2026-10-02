@@ -4,7 +4,7 @@ metadata:
   name: {{ name }}
 spec:
   model:
-    uri: pvc://{{ name }}-weights
+    uri: pvc://{{ pvc_name }}
     name: {{ model }}
   storageInitializer:
     enabled: false

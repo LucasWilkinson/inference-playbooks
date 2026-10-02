@@ -132,12 +132,11 @@ commit `results/<run-id>/run.yaml` and `result.json`. Link from
 
 Do not push directly to `main`. CI validates and computes affected recipes.
 
-## Recipe v3 (legacy)
+## Recipe v3 migration
 
-Existing v3 recipes (`schema_version: 3`) continue to validate. They use
-`deployment.components` referencing hand-authored manifests in `config/`.
-New recipes should use v4. See the [design document](design-recipe-v4.md)
-for migration details.
+The v3 schema is no longer supported. Recipes with `schema_version: 3` or
+`deployment.components` must be migrated to v4 before they can pass validation.
+See the [design document](design-recipe-v4.md) for migration details.
 
 ## Initial-release option: submit raw manifests
 

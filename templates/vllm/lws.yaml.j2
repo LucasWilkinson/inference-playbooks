@@ -25,8 +25,8 @@ spec:
             command: ["sh", "-c"]
             args:
               - |
-                vllm serve {{ model | tojson }} \
-                  --served-model-name={{ model | tojson }} \
+                vllm serve {{ model | shellquote }} \
+                  --served-model-name={{ model | shellquote }} \
                   --tensor-parallel-size {{ tp }} \
                   --pipeline-parallel-size {{ pp }} \
                   --nnodes {{ pp }} \
@@ -35,9 +35,9 @@ spec:
                   --port {{ port }} \
 {% for arg in leader_args %}
 {% if arg.value is defined and arg.value is not none %}
-                  {{ arg.flag }}={{ arg.value | tojson }} \
+                  {{ (arg.flag ~ "=" ~ arg.value) | shellquote }} \
 {% else %}
-                  {{ arg.flag }} \
+                  {{ arg.flag | shellquote }} \
 {% endif %}
 {% endfor %}
 
@@ -113,8 +113,8 @@ spec:
             command: ["sh", "-c"]
             args:
               - |
-                vllm serve {{ model | tojson }} \
-                  --served-model-name={{ model | tojson }} \
+                vllm serve {{ model | shellquote }} \
+                  --served-model-name={{ model | shellquote }} \
                   --tensor-parallel-size {{ tp }} \
                   --pipeline-parallel-size {{ pp }} \
                   --nnodes {{ pp }} \
@@ -123,9 +123,9 @@ spec:
                   --headless \
 {% for arg in worker_args %}
 {% if arg.value is defined and arg.value is not none %}
-                  {{ arg.flag }}={{ arg.value | tojson }} \
+                  {{ (arg.flag ~ "=" ~ arg.value) | shellquote }} \
 {% else %}
-                  {{ arg.flag }} \
+                  {{ arg.flag | shellquote }} \
 {% endif %}
 {% endfor %}
 

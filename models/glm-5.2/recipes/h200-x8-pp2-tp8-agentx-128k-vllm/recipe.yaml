@@ -44,9 +44,6 @@ serving:
       value: glm45
       required: true
       why: Separates thinking tokens from response content.
-    - flag: --enable-auto-tool-choice
-      required: true
-      why: Enables model-driven tool selection in chat completions.
     - flag: --enable-prefix-caching
       required: true
       why: Reduces TTFT on shared-prefix agentic traffic.

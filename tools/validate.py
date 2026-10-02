@@ -198,7 +198,7 @@ def validate_recipe_notes(repo: Path, recipe_path: Path, recipe: dict, schema: d
     return errors
 
 
-def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict) -> list[str]:
+def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict, registry: Registry | None = None) -> list[str]:
     """Validate v4-specific serving block constraints beyond JSON Schema."""
     errors: list[str] = []
     serving = recipe.get("serving", {})
@@ -284,7 +284,7 @@ def validate_v4_recipe(repo: Path, recipe_path: Path, recipe: dict) -> list[str]
     errors.extend(_validate_role_blocks(recipe_path, serving))
 
     # --- Platform override file validation ---
-    errors.extend(_validate_platform_overrides(repo, recipe_path, recipe))
+    errors.extend(_validate_platform_overrides(repo, recipe_path, recipe, registry))
 
     return errors
 
@@ -377,7 +377,7 @@ def _validate_role_blocks(recipe_path: Path, serving: dict) -> list[str]:
     return errors
 
 
-def _validate_platform_overrides(repo: Path, recipe_path: Path, recipe: dict) -> list[str]:
+def _validate_platform_overrides(repo: Path, recipe_path: Path, recipe: dict, registry: Registry | None = None) -> list[str]:
     """Validate platform override files referenced by platforms entries."""
     errors: list[str] = []
     platforms = recipe.get("platforms", [])
@@ -422,8 +422,8 @@ def _validate_platform_overrides(repo: Path, recipe_path: Path, recipe: dict) ->
         if override_schema_path.is_file():
             try:
                 override_schema = json.loads(override_schema_path.read_text())
-                registry = load_schema_registry(repo)
-                override_errors = validate_document(overrides_path, overrides, override_schema, registry)
+                effective_registry = registry or load_schema_registry(repo)
+                override_errors = validate_document(overrides_path, overrides, override_schema, effective_registry)
                 errors.extend(override_errors)
             except (OSError, json.JSONDecodeError) as error:
                 errors.append(f"{recipe_path}: cannot load platform override schema: {error}")
@@ -642,15 +642,39 @@ def main() -> int:
                 errors.append(f"{path}: duplicate recipe_id '{rid}' also used by {recipe_ids[rid]}")
             else:
                 recipe_ids[rid] = path
-        errors.extend(validate_v4_recipe(repo, path, recipe))
+        errors.extend(validate_v4_recipe(repo, path, recipe, registry))
         errors.extend(validate_recipe_layout(repo, path, recipe, runs_by_path))
         errors.extend(validate_recipe_notes(repo, path, recipe, schemas["recipe-notes"], registry))
         if flag_constraints is not None:
             model_data = models_by_id.get(recipe.get("model_id", ""), {})
-            constraint_errors = validate_recipe_against_constraints(
-                flag_constraints, recipe, model_data
-            )
-            errors.extend(f"{path}: {e}" for e in constraint_errors)
+            platforms = recipe.get("platforms", [])
+            if isinstance(platforms, list):
+                for platform_entry in platforms:
+                    if not isinstance(platform_entry, dict) or platform_entry.get("blocked"):
+                        continue
+                    stack = platform_entry.get("stack", "?")
+                    version = platform_entry.get("version", "?")
+                    effective_recipe = dict(recipe)
+                    effective_recipe["platform"] = {"stack": stack, "version": version}
+                    overrides_ref = platform_entry.get("overrides")
+                    if isinstance(overrides_ref, str):
+                        overrides_path = contained_path(path.parent, overrides_ref)
+                        if overrides_path and overrides_path.is_file():
+                            try:
+                                from render import merge_overrides
+                                overrides_data = load_yaml(overrides_path)
+                                if overrides_data:
+                                    effective_recipe["serving"] = merge_overrides(
+                                        recipe.get("serving", {}), overrides_data
+                                    )
+                            except (OSError, ValueError, yaml.YAMLError):
+                                pass
+                    constraint_errors = validate_recipe_against_constraints(
+                        flag_constraints, effective_recipe, model_data
+                    )
+                    errors.extend(
+                        f"{path}: [{stack}-{version}] {e}" for e in constraint_errors
+                    )
     for path in sorted(repo.glob("models/**/results/**/result.json")):
         try:
             result = json.loads(path.read_text())

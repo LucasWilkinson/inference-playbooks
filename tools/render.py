@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -140,6 +141,8 @@ def build_template_context(
     env = serving.get("env", [])
     port = serving.get("port", 8000)
     name = sanitize_name(recipe["recipe_id"])
+    pvc = recipe.get("deployment", {}).get("storage", {}).get("pvc", {})
+    pvc_name = pvc.get("name", f"{name}-weights")
 
     role_name = "decode"
     kind = COMPONENT_KIND.get((stack, mode), "Deployment")
@@ -165,6 +168,7 @@ def build_template_context(
 
     return {
         "name": name,
+        "pvc_name": pvc_name,
         "image": serving["image"],
         "model": serving["model"],
         "tp": tp,
@@ -195,6 +199,7 @@ def render_template(template_path: str, context: dict) -> str:
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.filters["shellquote"] = shlex.quote
     template = env.get_template(template_path)
     return template.render(**context)
 
@@ -320,14 +325,6 @@ def render_recipe(
         errors.append(f"flag-constraints: {exc}")
         constraints = None
 
-    if constraints:
-        constraint_errors = validate_recipe_against_constraints(
-            constraints, recipe, model
-        )
-        if constraint_errors:
-            errors.extend(f"{recipe_path}: {e}" for e in constraint_errors)
-            return "", errors
-
     platforms = recipe.get("platforms", [])
     if not isinstance(platforms, list) or not platforms:
         return "", [f"{recipe_path}: no platforms defined"]
@@ -345,13 +342,14 @@ def render_recipe(
             if not pinned_path.is_file():
                 errors.append(f"{recipe_path}: pinned_manifest does not exist: {pinned_ref}")
                 continue
-            rendered = pinned_path.read_text()
+            pinned_bytes = pinned_path.read_bytes()
+            rendered = pinned_bytes.decode("utf-8")
             if not dry_run:
                 stack_dir = f"{stack}-{version}" if version else stack
                 manifest_dir = recipe_path.parent / "manifests" / stack_dir
                 manifest_dir.mkdir(parents=True, exist_ok=True)
                 output_path = manifest_dir / pinned_path.name
-                output_path.write_text(rendered)
+                output_path.write_bytes(pinned_bytes)
                 print(f"  wrote {output_path.relative_to(repo)} (pinned)")
             all_rendered.append(rendered)
             continue
@@ -362,17 +360,28 @@ def render_recipe(
         overrides_ref = platform_entry.get("overrides")
         if overrides_ref:
             overrides_path = recipe_path.parent / overrides_ref
-            if overrides_path.is_file():
-                try:
-                    overrides = load_yaml_file(overrides_path)
-                    if overrides:
-                        effective_serving = merge_overrides(serving, overrides)
-                except (OSError, ValueError, yaml.YAMLError) as exc:
-                    errors.append(f"{recipe_path}: cannot load overrides {overrides_ref}: {exc}")
-                    continue
+            if not overrides_path.is_file():
+                errors.append(f"{recipe_path}: override file does not exist: {overrides_ref}")
+                continue
+            try:
+                overrides = load_yaml_file(overrides_path)
+                if overrides:
+                    effective_serving = merge_overrides(serving, overrides)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                errors.append(f"{recipe_path}: cannot load overrides {overrides_ref}: {exc}")
+                continue
 
         effective_recipe = dict(recipe)
         effective_recipe["serving"] = effective_serving
+        effective_recipe["platform"] = {"stack": stack, "version": version}
+
+        if constraints:
+            constraint_errors = validate_recipe_against_constraints(
+                constraints, effective_recipe, model
+            )
+            if constraint_errors:
+                errors.extend(f"{recipe_path}: [{stack}-{version}] {e}" for e in constraint_errors)
+                continue
 
         try:
             template_path = select_template(stack, mode)
