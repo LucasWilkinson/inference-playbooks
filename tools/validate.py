@@ -667,8 +667,17 @@ def main() -> int:
                                     effective_recipe["serving"] = merge_overrides(
                                         recipe.get("serving", {}), overrides_data
                                     )
-                            except (OSError, ValueError, yaml.YAMLError):
-                                pass
+                            except (
+                                OSError,
+                                ValueError,
+                                yaml.YAMLError,
+                                KeyError,
+                                TypeError,
+                            ) as error:
+                                errors.append(
+                                    f"{path}: [{stack}-{version}] cannot apply platform overrides for constraint check: {error}"
+                                )
+                                continue
                     constraint_errors = validate_recipe_against_constraints(
                         flag_constraints, effective_recipe, model_data
                     )
