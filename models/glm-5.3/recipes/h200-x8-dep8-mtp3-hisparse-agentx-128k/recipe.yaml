@@ -1,0 +1,127 @@
+schema_version: 4
+recipe_id: glm-5.3-dep8-mtp3-hisparse
+model_id: glm-5.3
+platforms:
+  - stack: vllm
+    version: v0.31.0
+    overrides: platforms/vllm-v0.31.0.yaml
+hardware_profile: hardware-profiles/coreweave-h200-sxm-8x-2tib-r1.yaml
+workload_profile: aiperf-agentx-128k
+deployment_mode: dep8-mtp3-hisparse
+optimization_intent: throughput
+maturity: contributed
+
+quantization: FP8
+
+features:
+  tool_calling: true
+  speculative_decoding: mtp
+  reasoning_parser: glm45
+  prefix_caching: true
+  kv_cache_dtype: fp8_ds_mla
+
+serving:
+  image: docker.io/vllm/vllm-openai:v0.31.0
+  image_usage:
+    kind: default
+    variant: cuda
+  engine:
+    name: vllm
+    version: 0.31.0
+    image: docker.io/vllm/vllm-openai:v0.31.0
+    source: https://github.com/vllm-project/vllm/releases/tag/v0.31.0
+  model: zai-org/GLM-5.3
+  parallelism:
+    mode: dp
+    tp: 1
+    dp: 8
+  resources:
+    requests:
+      cpu: "32"
+      memory: 800Gi
+    limits:
+      cpu: "128"
+      memory: 1500Gi
+  env:
+    - name: HOME
+      value: /tmp
+    - name: HF_HOME
+      value: /home/nobody/.cache/huggingface
+    - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+      value: "0"
+  port: 8000
+  config_overrides: true
+  args:
+    - flag: --revision
+      value: 30333038ada1f1dacb294a93270305a890b50c14
+      required: true
+      why: Pins the checkpoint revision the recipe was measured on.
+    - flag: --trust-remote-code
+      required: true
+      why: Matches the measured configuration.
+    - flag: --enable-expert-parallel
+      required: true
+      why: Shards the MoE experts across the 8 DP ranks (EP8); attention stays data-parallel.
+    - flag: --kv-cache-dtype
+      value: fp8_ds_mla
+      required: true
+      why: FP8 sparse-MLA KV cache layout used by GLM-5.3 DSA attention.
+    - flag: --moe-backend
+      value: deep_gemm
+      required: true
+      why: DeepGEMM FP8 grouped GEMM for the routed experts on Hopper.
+    - flag: --kernel-config
+      value: '{"enable_flashinfer_autotune":false,"linear_backend":"deep_gemm"}'
+      required: true
+      why: DeepGEMM for the dense FP8 linears; skips FlashInfer autotuning at startup.
+    - flag: --speculative-config
+      value: '{"method":"mtp","num_speculative_tokens":3}'
+      required: true
+      why: MTP speculative decoding with the checkpoint's built-in next-token layer, 3 draft tokens.
+    - flag: --attention-config
+      value: '{"hisparse_config":{}}'
+      required: true
+      why: Enables HiSparse, which keeps sparse-attention KV in a host-memory pool and stages only the selected pages on the GPU.
+    - flag: --kv-transfer-config
+      value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":48}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":17179869184,"eviction_policy":"lru"}}]}}'
+      required: true
+      why: Per DP rank, a 48 GiB HiSparse host pool plus 16 GiB native CPU prefix-cache offload; 512 GiB of host KV per node across the 8 ranks.
+    - flag: --enable-prefix-caching
+      required: true
+      why: Agentic traffic reuses long conversation prefixes.
+    - flag: --max-model-len
+      value: "142000"
+      required: true
+      why: Covers the AgentX 128K workload's longest requests.
+    - flag: --max-num-seqs
+      value: "64"
+      required: true
+      why: Per DP rank. Each rank has its own KV pool, so the node holds far more concurrent context than TP8.
+    - flag: --max-num-batched-tokens
+      value: "8192"
+      required: true
+      why: Chunked-prefill budget per step; bounds how long a prefill chunk stalls decodes.
+    - flag: --gpu-memory-utilization
+      value: "0.93"
+      required: true
+      why: Leaves headroom for CUDA graphs and DeepGEMM workspaces outside the KV pool.
+    - flag: --safetensors-load-strategy
+      value: prefetch
+      required: true
+      why: Prefetches checkpoint shards; speeds cold load from network storage.
+    - flag: --enable-auto-tool-choice
+      required: true
+      why: Enables model-driven tool calls for agentic clients.
+    - flag: --tool-call-parser
+      value: glm47
+      required: true
+      why: GLM tool-call format.
+    - flag: --reasoning-parser
+      value: glm45
+      required: true
+      why: Separates GLM thinking tokens from response content.
+
+deployment:
+  scope: single-node
+
+notes: guides/notes.yaml

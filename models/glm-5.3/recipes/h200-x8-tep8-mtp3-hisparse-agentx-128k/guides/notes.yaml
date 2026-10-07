@@ -1,0 +1,51 @@
+schema_version: 1
+profile:
+  label: GLM-5.3 TP8/EP8 + HiSparse (low latency)
+  sub: One aggregated vLLM engine on one eight-H200 node.
+  headline: Best per-user interactivity at low concurrency; KV capacity caps it around 32 concurrent agentic sessions.
+  specs:
+    - {label: Node scope, source: "recipe.yaml#/deployment/scope"}
+    - {label: Tensor parallel, source: "recipe.yaml#/serving/parallelism/tp"}
+    - {label: /dev/shm size, source: "config/shm.yaml#/spec/template/spec/volumes/0/emptyDir/sizeLimit"}
+decisions:
+  - subjects: ["--tensor-parallel-size", "--enable-expert-parallel"]
+    why: >
+      TP8 attention splits every decode step across all 8 GPUs, so per-request
+      latency is lower than DP8. The cost is that MLA KV is replicated on every
+      rank, so the node holds about 2.35M KV tokens on GPU versus about 5.6M for
+      DP8.
+  - subjects: ["--attention-config", "--kv-transfer-config", "config/shm.yaml"]
+    why: >
+      HiSparse (384 GiB) plus native CPU offload (128 GiB) give 512 GiB of host
+      KV. On a single-node TP>1 engine, vLLM v0.31.0 keeps one shared copy of
+      both pools in /dev/shm, so the pod needs a /dev/shm larger than 512 GiB
+      and a memory limit above that.
+  - subjects: ["--max-num-seqs"]
+    why: Sized at about 2x the highest concurrency the recipe targets.
+  - subjects: [docker.io/vllm/vllm-openai:v0.31.0]
+    why: The upstream v0.31.0 release image is built from commit db9527a468, the commit the recipe was measured on.
+    status:
+      state: needs-verification
+      note: Measured on a source build of db9527a468, not on this image.
+omissions:
+  - setting: --all2all-backend
+    why_not: >
+      Uses vLLM's default (allgather_reducescatter). deepep_low_latency
+      overflows DeepEP's int32 RDMA buffer at 8192 batched tokens, and
+      deepep_high_throughput cannot be captured in CUDA graphs.
+quickstart:
+  - {step: Prepare, detail: "Create the hf-token Secret. Pick a node with at least 1.5 TiB of allocatable memory."}
+  - {step: Deploy, detail: "Apply manifests/vllm-v0.31.0/deployment.yaml. The template downloads about 700 GB of weights into an emptyDir; replace hf-cache with a pre-populated PVC for repeat deployments."}
+  - {step: Benchmark, detail: Run AIPerf AgentX 128K and record artifacts before claiming validated maturity.}
+insights:
+  - >
+    Screening (AgentX 128K, InferenceX method, 20-minute runs, vLLM source
+    build at db9527a468, synthetic MTP acceptance length 2.99) favored this
+    layout over the DP8 recipe at concurrency 8-16 (about 10-20% higher P90
+    per-user interactivity at similar throughput). From concurrency 32 the DP8
+    recipe was better on both axes. At concurrency 64 this layout ran out of
+    GPU KV and median TTFT reached about 90 s.
+known_issues:
+  - issue: GPU KV capacity limits concurrency.
+    impact: Above about 32 concurrent long-context agentic sessions, requests queue for KV space and TTFT collapses.
+    mitigation: Use the DP8/EP8 + HiSparse throughput recipe for higher concurrency.
