@@ -55,10 +55,10 @@ serving:
     - flag: --revision
       value: 30333038ada1f1dacb294a93270305a890b50c14
       required: true
-      why: Pins the checkpoint revision the recipe was measured on.
+      why: Pins the checkpoint revision.
     - flag: --trust-remote-code
       required: true
-      why: Matches the measured configuration.
+      why: Loads the checkpoint's remote code.
     - flag: --enable-expert-parallel
       required: true
       why: Shards the MoE experts across the 8 DP ranks (EP8); attention stays data-parallel.

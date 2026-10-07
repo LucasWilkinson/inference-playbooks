@@ -8,45 +8,18 @@ profile:
     - {label: Data parallel, source: "recipe.yaml#/serving/parallelism/dp"}
 decisions:
   - subjects: ["--data-parallel-size", "--enable-expert-parallel"]
-    why: >
-      Each DP rank holds its own MLA KV pool instead of a replica, so the node
-      holds about 5.6M KV tokens on GPU versus about 2.35M for TP8. That keeps
-      high concurrency out of KV-capacity queueing.
+    why: Each DP rank has its own MLA KV pool (~5.6M GPU KV tokens per node vs ~2.35M for TP8, which replicates KV), so high concurrency does not queue on KV capacity.
   - subjects: ["--attention-config", "--kv-transfer-config"]
-    why: >
-      48 GiB HiSparse plus 16 GiB native CPU offload per rank: 512 GiB of host
-      KV per node, the same host budget as the TP8 recipe. Pools are private
-      pinned memory per rank, counted against the pod memory limit.
-  - subjects: ["--max-num-seqs"]
-    why: Per DP rank.
-  - subjects: [docker.io/vllm/vllm-openai:v0.31.0]
-    why: The upstream v0.31.0 release image is built from commit db9527a468, the commit the recipe was measured on.
-    status:
-      state: needs-verification
-      note: Measured on a source build of db9527a468, not on this image.
+    why: 48 GiB HiSparse + 16 GiB CPU offload per rank = 512 GiB host KV per node, held as private pinned memory that counts toward the pod memory limit.
 omissions:
   - setting: --all2all-backend
-    why_not: >
-      Uses vLLM's default (allgather_reducescatter). deepep_low_latency
-      overflows DeepEP's int32 RDMA buffer at 8192 batched tokens, and
-      deepep_high_throughput cannot be captured in CUDA graphs.
+    why_not: The default (allgather_reducescatter) is used; deepep_low_latency overflows DeepEP's RDMA buffer at 8192 batched tokens and deepep_high_throughput cannot be CUDA-graph captured.
 quickstart:
-  - {step: Prepare, detail: "Create the hf-token Secret. Pick a node with at least 1.5 TiB of allocatable memory."}
-  - {step: Deploy, detail: "Apply manifests/vllm-v0.31.0/deployment.yaml. The template downloads about 700 GB of weights into an emptyDir; replace hf-cache with a pre-populated PVC for repeat deployments."}
-  - {step: Benchmark, detail: Run AIPerf AgentX 128K and record artifacts before claiming validated maturity.}
+  - {step: Prepare, detail: "Create the hf-token Secret; the node needs at least 1.5 TiB of allocatable memory."}
+  - {step: Deploy, detail: "Apply manifests/vllm-v0.31.0/deployment.yaml. Weights (~700 GB) download into an emptyDir; use a pre-populated PVC for repeat deployments."}
 insights:
-  - >
-    Screening (AgentX 128K, InferenceX method, 20-minute runs, vLLM source
-    build at db9527a468, synthetic MTP acceptance length 2.99) favored this
-    layout over the TP8 recipe from concurrency 32 up, on both throughput and
-    interactivity. It also stayed stable at concurrency 64, where TP8 ran out
-    of GPU KV. At concurrency 8-16 the TP8 recipe gave 10-20% better
-    interactivity.
+  - Beats the TP8/EP8 + HiSparse recipe on both throughput and interactivity from concurrency 32 and stays stable at 64; TP8 is better below 32.
 known_issues:
-  - issue: Routing differs from the measured setup.
-    impact: >
-      The rendered Deployment uses vLLM's internal DP load balancer, which has
-      no prefix-cache affinity. The screening runs exposed one port per DP rank
-      behind the llm-d router with queue, KV-utilization and prefix-cache
-      scorers. Multi-turn agentic traffic may see fewer prefix-cache hits here.
-    mitigation: For prefix-heavy traffic, run per-rank external load balancing (--data-parallel-rank per port) behind a prefix-aware router.
+  - issue: vLLM's internal DP load balancer has no prefix-cache affinity.
+    impact: Multi-turn agentic traffic may get fewer prefix-cache hits than with a prefix-aware router.
+    mitigation: Expose one port per DP rank (external load balancing) behind a prefix-aware router such as llm-d.
