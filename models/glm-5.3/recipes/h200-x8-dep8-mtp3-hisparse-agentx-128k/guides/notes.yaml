@@ -1,25 +1,16 @@
 schema_version: 1
 profile:
-  label: GLM-5.3 DP8/EP8 + HiSparse (high throughput)
-  sub: Eight data-parallel ranks with expert parallelism on one eight-H200 node.
-  headline: Highest throughput per GPU at 32+ concurrent agentic sessions.
+  label: GLM-5.3 DP8/EP8 + HiSparse
+  headline: Recommended single-node GLM-5.3 deployment on 8x H200 with vLLM v0.31.0.
   specs:
     - {label: Node scope, source: "recipe.yaml#/deployment/scope"}
     - {label: Data parallel, source: "recipe.yaml#/serving/parallelism/dp"}
 decisions:
   - subjects: ["--data-parallel-size", "--enable-expert-parallel"]
-    why: Each DP rank has its own MLA KV pool (~5.6M GPU KV tokens per node vs ~2.35M for TP8, which replicates KV), so high concurrency does not queue on KV capacity.
-  - subjects: ["--attention-config", "--kv-transfer-config"]
-    why: 48 GiB HiSparse + 16 GiB CPU offload per rank = 512 GiB host KV per node, held as private pinned memory that counts toward the pod memory limit.
-omissions:
-  - setting: --all2all-backend
-    why_not: The default (allgather_reducescatter) is used; deepep_low_latency overflows DeepEP's RDMA buffer at 8192 batched tokens and deepep_high_throughput cannot be CUDA-graph captured.
+    why: Each DP rank has its own KV pool, so concurrency does not queue on KV capacity; beat TP8/EP8 from 32 concurrent sessions up.
 quickstart:
-  - {step: Prepare, detail: "Create the hf-token Secret; the node needs at least 1.5 TiB of allocatable memory."}
-  - {step: Deploy, detail: "Apply manifests/vllm-v0.31.0/deployment.yaml. Weights (~700 GB) download into an emptyDir; use a pre-populated PVC for repeat deployments."}
-insights:
-  - Beats the TP8/EP8 + HiSparse recipe on both throughput and interactivity from concurrency 32 and stays stable at 64; TP8 is better below 32.
+  - {step: Deploy, detail: "Create the hf-token Secret and apply manifests/vllm-v0.31.0/deployment.yaml on a node with 1.5 TiB of allocatable memory."}
 known_issues:
   - issue: vLLM's internal DP load balancer has no prefix-cache affinity.
-    impact: Multi-turn agentic traffic may get fewer prefix-cache hits than with a prefix-aware router.
-    mitigation: Expose one port per DP rank (external load balancing) behind a prefix-aware router such as llm-d.
+    impact: Multi-turn traffic gets fewer prefix-cache hits than behind a prefix-aware router.
+    mitigation: Put one port per DP rank behind a prefix-aware router such as llm-d.

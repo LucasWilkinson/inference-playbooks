@@ -1,9 +1,5 @@
-# The template mounts /dev/shm only for TP>1. Eight DP ranks in one pod still
-# need it for NCCL and inter-process tensors. The HiSparse and offload pools
-# are private pinned memory per rank here, not /dev/shm, but they count toward
-# the pod memory limit.
-# Startup (weight load, DeepGEMM warmup, CUDA-graph capture, pinning 512 GiB
-# of host KV) can exceed the template's 30-minute startup probe; allow 60.
+# /dev/shm holds each rank's 16 GiB CPU offload region (128 GiB for 8 ranks) plus
+# NCCL buffers; the template mounts it only for TP>1. Startup probe: 60 minutes.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,4 +19,4 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 64Gi
+            sizeLimit: 192Gi
