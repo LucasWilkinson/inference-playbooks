@@ -1,0 +1,49 @@
+# Patch only settings not honored by main's vLLM template yet.
+# Image, serving flags, TP, resources and container boilerplate remain generated.
+- op: test
+  path: /spec/template/spec/containers/0/name
+  value: vllm
+- op: test
+  path: /spec/template/spec/containers/0/args/0
+  value: zai-org/GLM-5.2-FP8
+- op: replace
+  path: /spec/template/spec/containers/0/args/0
+  value: /mnt/models
+- op: test
+  path: /spec/template/spec/containers/0/args/1
+  value: --served-model-name=zai-org/GLM-5.2-FP8
+- op: replace
+  path: /spec/template/spec/containers/0/args/1
+  value: --served-model-name=glm-5.2-fp8
+# Main's template injects an 8-CPU limit even though serving declares no limit.
+# Remove it so the limit cannot be lower than the declared CPU request.
+- op: remove
+  path: /spec/template/spec/containers/0/resources/limits/cpu
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: model-weights
+    persistentVolumeClaim:
+      claimName: glm52-weights
+      readOnly: true
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: model-weights
+    mountPath: /mnt/models
+    readOnly: true
+- op: replace
+  path: /spec/template/spec/containers/0/startupProbe/periodSeconds
+  value: 10
+- op: replace
+  path: /spec/template/spec/containers/0/startupProbe/failureThreshold
+  value: 180
+- op: replace
+  path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+  value: /v1/models
+- op: test
+  path: /spec/template/spec/volumes/2/name
+  value: dshm
+- op: replace
+  path: /spec/template/spec/volumes/2/emptyDir/sizeLimit
+  value: 16Gi

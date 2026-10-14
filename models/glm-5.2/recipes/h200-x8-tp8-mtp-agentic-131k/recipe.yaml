@@ -11,12 +11,6 @@ platforms:
   - stack: vllm
     version: v0.24.0
     overrides: platforms/vllm-v0.24.0.yaml
-    pinned_manifest: manifests/pinned-vllm/deployment.yaml
-    pinned_reason: >-
-      Hand-authored standalone runtime preserves local weights, shared memory,
-      alias and probes without depending on pending declarative/companion tooling.
-      Keep the pin synchronized manually with serving and the RHOAI overlays;
-      it has not been independently deployed or benchmarked.
 hardware_profile: hardware-profiles/nvidia-h200-sxm-8x-nvlink-r1.yaml
 workload_profile: aiperf-agentx-128k  # Target workload; no committed benchmark evidence.
 deployment_mode: tp8-mtp
@@ -110,7 +104,7 @@ deployment:
   storage:
     type: pvc
     pvc:
-      # Adapt together with config/runtime.yaml and the hand-authored vLLM pin.
+      # Adapt together with config/runtime.yaml and config/vllm-runtime.yaml.
       name: glm52-weights
     why: >-
       Pre-populated exact FP8 checkpoint mounted read-only at /mnt/models.
@@ -120,9 +114,6 @@ deployment:
     - path: manifests/rhoai-3.5/llminferenceservice.yaml
       kind: LLMInferenceService
       generated: true
-    - path: manifests/pinned-vllm/deployment.yaml
-      kind: Deployment
-      generated: false
     - path: manifests/vllm-v0.24.0/deployment.yaml
       kind: Deployment
       generated: true
