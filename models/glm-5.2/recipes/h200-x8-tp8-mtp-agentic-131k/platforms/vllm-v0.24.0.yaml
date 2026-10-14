@@ -1,0 +1,5 @@
+# Metadata for the hand-authored standalone pin; rendering copies it verbatim.
+# Changes here or in serving do not rewrite the pinned container specification.
+image_usage:
+  kind: default
+  variant: cuda

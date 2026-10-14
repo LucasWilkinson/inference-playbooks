@@ -532,6 +532,31 @@ class RenderRecipeIntegrationTests(unittest.TestCase):
         self.assertTrue(output_path.is_file())
         self.assertEqual(output_path.read_text(), pinned_content)
 
+    def test_pinned_manifest_bypasses_shared_runtime_overlay(self):
+        """A standalone pin must not receive another platform's runtime patches."""
+        from unittest.mock import patch
+        from render import render_recipe
+
+        recipe = make_recipe(tp=1)
+        recipe["serving"]["config_overrides"] = True
+        recipe["platforms"] = [{
+            "stack": "vllm", "version": "v0.24.0",
+            "overrides": "platforms/vllm-v0.24.0.yaml",
+            "pinned_manifest": "manifests/pinned-source/deployment.yaml",
+            "pinned_reason": "Synthetic standalone pin with a shared overlay present.",
+        }]
+        source = self.recipe_dir / "manifests/pinned-source/deployment.yaml"
+        source.parent.mkdir(parents=True)
+        content = "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: pinned}\n"
+        source.write_text(content)
+        recipe_path = self._write_recipe(recipe)
+        with patch("render.run_kustomize", side_effect=AssertionError("overlay must not run")):
+            rendered, errors = render_recipe(self.tmpdir, recipe_path)
+        self.assertFalse(errors, errors)
+        self.assertEqual(rendered, content)
+        output = self.recipe_dir / "manifests/vllm-v0.24.0/deployment.yaml"
+        self.assertEqual(output.read_bytes(), source.read_bytes())
+
     def test_render_all_blocked_produces_no_output(self):
         from render import render_recipe
         recipe = make_recipe(tp=1)

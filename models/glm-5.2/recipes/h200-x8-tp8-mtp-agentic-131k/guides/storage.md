@@ -2,6 +2,10 @@
 
 This configuration requires an existing PVC containing the complete served
 checkpoint. It does not create a downloader, PVC, namespace or token secret.
+Choose either the [RHOAI service](../manifests/rhoai-3.5/llminferenceservice.yaml)
+or the [standalone vLLM Deployment](../manifests/vllm-v0.24.0/deployment.yaml).
+Both remain day-zero and needs-verification in [recipe.yaml](../recipe.yaml).
+Do not deploy both against a claim whose attachment policy cannot support it.
 A reusable downloader is tracked in
 [issue #42](https://github.com/openshift-psap/inference-playbooks/issues/42).
 Memory-backed `/dev/shm` is separate from persistent model storage.
@@ -25,13 +29,18 @@ resolved immutable revision, file inventory and integrity/completion evidence
 outside mutable serving summaries. Serving must not consume a partial download
 or a symlink tree whose targets lie outside the mounted PVC.
 
-The local JSON6902 overlay mounts this existing PVC read-only at **/mnt/models**.
+For RHOAI, the local JSON6902 overlay mounts this existing PVC read-only at **/mnt/models**.
 The inherited downstream runtime command serves `/mnt/models`, and the model URI
 is `pvc://glm52-weights`. `spec.model.name` is the API alias
 `glm-5.2-fp8`, while `serving.model` retains the quantization-specific checkpoint
 identity. Do not confuse the API alias with the on-disk checkpoint.
 
-## Why an explicit mount is necessary
+The [hand-authored standalone pin](../manifests/pinned-vllm/deployment.yaml)
+mounts the same checkpoint read-only and explicitly supplies the local model
+path, API alias and TP8 args to `vllm serve`. It does not inherit the RHOAI
+controller command, TLS settings or overlays.
+
+## Why an explicit RHOAI mount is necessary
 
 The downstream controller's
 [disabled-initializer path](https://github.com/red-hat-data-services/kserve/blob/881aa93dc885f9bbb57fe020defafab48bd93fd7/pkg/controller/v1alpha2/llmisvc/workload_storage.go#L97-L104)
@@ -59,9 +68,10 @@ directories are writable by the allocated UID and groups.
 2. Verify the claim is Bound, its node attachment/access policy fits this
    single-node serving deployment, and its actual available capacity fits the
    complete checkpoint. The generic hardware profile is not PVC inventory.
-3. Change **both** `recipe.yaml#/deployment/storage/pvc/name` and the concrete
-   `claimName` in `config/runtime.yaml` when selecting another PVC. This preserves
-   agreement between the model URI and explicit mount. Storage class/access mode
+3. Change `deployment.storage.pvc.name` in [recipe.yaml](../recipe.yaml), the
+   `claimName` in [config/runtime.yaml](../config/runtime.yaml), and the claim in
+   the [standalone pin](../manifests/pinned-vllm/deployment.yaml) when selecting
+   another PVC. This preserves agreement between both platforms. Storage class/access mode
    are properties of the selected existing PVC; no creation manifest overrides
    them. If you record optional `size`, `storage_class` or `access_modes` metadata
    in the recipe, they must describe that actual claim, not a universal policy.
@@ -69,9 +79,12 @@ directories are writable by the allocated UID and groups.
    the local model-URI patch and the read-only mount's `subPath` together to the
    same existing directory. Do not insert unexpanded placeholders or rely on
    an external hub-cache symlink. The checked example intentionally uses root.
-5. Current template references the **existing** secret `hf-token`, key
+   For standalone vLLM, update the pin's local model argv path and mount/subPath
+   consistently with that same checkpoint directory.
+5. Both targets reference the **existing** secret `hf-token`, key
    `HF_TOKEN`, in the selected namespace. Supply it through your approved secret
-   process or adapt that reference in a recipe-local JSON6902 patch and regenerate.
+   process or adapt the RHOAI reference in a recipe-local JSON6902 patch and the
+   standalone reference in the pin, then regenerate.
    It is not supplied here, and no credentials belong in Git. A complete local
    checkpoint may not need network access, but that does not remove the manifest's
    secret reference automatically. Do not add credentials to the PVC or a guide.
@@ -91,14 +104,40 @@ schedulability, GLM/MTP correctness or AgentX performance.
 
 ## API alias and probes
 
-The runtime overlay sets `spec.model.name: glm-5.2-fp8`, startup
-`/health:8000` with 180 attempts every 10 seconds, and readiness `/v1/models:8000`
-every 10 seconds. Cold-load duration and serving behavior remain unvalidated.
+The RHOAI alias and probes are set by [config/runtime.yaml](../config/runtime.yaml)
+and described by `serving.served_model_name` and `serving.probes` in
+[recipe.yaml](../recipe.yaml). The standalone pin owns its explicit argv and
+probe definitions. Keep them synchronized when adapting either configuration.
+Cold-load duration and serving behavior remain unvalidated.
 
-**Probe scheme follows the controller:** the downstream default
+**RHOAI probe scheme follows the controller:** the downstream default
 runtime adds SSL args and HTTPS probe schemes conditionally on
 `GlobalConfig.EnableTLS`. The overlay omits the probe scheme so the controller's
 strategic merge retains its preset scheme while overriding paths, ports and
 budgets. Do not disable controller TLS or force HTTP merely to adapt probes.
 Verify transport-consistent server and probe behavior with the installed
 controller presets, particularly after upgrades.
+
+## Standalone pin ownership and deployment
+
+- Edit [manifests/pinned-vllm/deployment.yaml](../manifests/pinned-vllm/deployment.yaml)
+  as the authoritative hand-authored source. The `pinned_manifest` entry in
+  [recipe.yaml](../recipe.yaml) copies it verbatim to the published
+  [manifests/vllm-v0.24.0/deployment.yaml](../manifests/vllm-v0.24.0/deployment.yaml).
+  Do not edit the generated copy. Pinning bypasses the shared RHOAI overlays.
+- Changes to `serving`, platform overrides or RHOAI patches **do not update the
+  pin**. Review the image/engine, model path and alias, TP, all serving flags,
+  resources, probes, PVC and shared memory together. Keep speculative-config JSON
+  as one raw argv token, not the RHOAI shell-prequoted value.
+- The standalone manifest uses HTTP probes and has no Service, Route, TLS
+  termination or authentication resource. Use namespace-scoped port-forwarding
+  for initial checks or separately reviewed networking for exposure; RHOAI
+  routing/security policy does not apply automatically.
+- Its non-root UID and security context must be accepted by the namespace's
+  approved SCC policy, with readable weights and writable cache/temp mounts.
+  A pinned UID is not guaranteed to fit an OpenShift namespace's allocated UID
+  range. Adapt the pin through review; no SCC grant is provided here.
+- Rendering and drift checks prove the source/copy relationship, not runtime
+  equivalence with `serving` or upstream model support. Independently verify
+  checkpoint loading, probes, required and automatic tool calls with MTP enabled,
+  and benchmark behavior on each platform before claiming validation.
