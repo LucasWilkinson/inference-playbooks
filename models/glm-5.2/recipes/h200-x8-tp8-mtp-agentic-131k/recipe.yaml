@@ -48,9 +48,9 @@ serving:
     startup:
       path: /health
       port: 8000
-      failure_threshold: 180
+      failure_threshold: 720
       period_seconds: 10
-      why: Startup budget for model loading; cold-load duration is unverified.
+      why: Two-hour budget for cold model download and loading; measured duration is unverified.
     readiness:
       path: /v1/models
       port: 8000
@@ -98,18 +98,19 @@ deployment:
   status:
     state: needs-verification
     note: >-
-      Single-node RHOAI and standalone vLLM configurations with a pre-populated model PVC
-      and separate memory-backed shared memory. Deployment prerequisites,
-      GLM TP8/MTP serving and benchmarks have not been independently validated.
+      RHOAI uses a pre-populated model PVC; standalone vLLM downloads the model
+      into an ephemeral cache. Deployment prerequisites, GLM TP8/MTP serving and
+      benchmarks have not been independently validated.
   storage:
     type: pvc
     pvc:
-      # Adapt together with config/runtime.yaml and config/vllm-runtime.yaml.
+      # RHOAI only. Adapt together with config/runtime.yaml.
       name: glm52-weights
     why: >-
-      Pre-populated exact FP8 checkpoint mounted read-only at /mnt/models.
-      PVC name, storage class, access mode and capacity are deployment-selected;
-      no PVC is provisioned and no universal 800Gi or RWX requirement is imposed.
+      RHOAI requires the exact FP8 checkpoint pre-populated in a PVC and mounted
+      read-only at /mnt/models. The standalone vLLM Deployment downloads
+      serving.model from Hugging Face. PVC name, storage class, access mode and
+      capacity are deployment-selected; this recipe does not provision a PVC.
   manifests:
     - path: manifests/rhoai-3.5/llminferenceservice.yaml
       kind: LLMInferenceService

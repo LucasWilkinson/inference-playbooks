@@ -6,6 +6,7 @@ metadata:
     app.kubernetes.io/name: glm-5-2-fp8-h200-agentic
   name: glm-5-2-fp8-h200-agentic
 spec:
+  progressDeadlineSeconds: 7200
   replicas: 1
   selector:
     matchLabels:
@@ -17,7 +18,7 @@ spec:
     spec:
       containers:
       - args:
-        - /mnt/models
+        - zai-org/GLM-5.2-FP8
         - --served-model-name=glm-5.2-fp8
         - --kv-cache-dtype=fp8
         - --max-model-len=131072
@@ -73,7 +74,7 @@ spec:
             drop:
             - ALL
         startupProbe:
-          failureThreshold: 180
+          failureThreshold: 720
           httpGet:
             path: /health
             port: 8000
@@ -85,9 +86,6 @@ spec:
           name: tmp
         - mountPath: /dev/shm
           name: dshm
-        - mountPath: /mnt/models
-          name: model-weights
-          readOnly: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -102,7 +100,3 @@ spec:
           medium: Memory
           sizeLimit: 16Gi
         name: dshm
-      - name: model-weights
-        persistentVolumeClaim:
-          claimName: glm52-weights
-          readOnly: true

@@ -1,4 +1,4 @@
-# Recipe-local JSON6902 customization, not a standalone deployment.
+# RHOAI-only JSON6902 customization, not a standalone deployment.
 # glm52-weights is a concrete example pre-populated PVC in the deployer's namespace.
 # Adapt this claimName and recipe.yaml deployment.storage.pvc.name together.
 # 16Gi memory-backed shared memory is separate from the read-only weights PVC.
