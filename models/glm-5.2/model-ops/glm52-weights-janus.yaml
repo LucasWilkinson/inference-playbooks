@@ -9,4 +9,4 @@ spec:
   storageClassName: nfs
   resources:
     requests:
-      storage: 2Ti
+      storage: 1Ti

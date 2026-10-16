@@ -12,7 +12,7 @@ storage.
 
 The PVC must be Bound in the target namespace and large enough for the complete
 **zai-org/GLM-5.2-FP8** checkpoint plus preparation headroom. The checkpoint
-files currently total about 756 GB. The Janus lab example requests 2 TiB on
+files currently total about 756 GB. The Janus lab example requests 1 TiB on
 NFS; other environments should choose storage class, access mode and capacity
 for their own storage. Serving manifests do not create or resize claims. Ensure
 the PVC is writable by the downloader and readable by the serving pod's
