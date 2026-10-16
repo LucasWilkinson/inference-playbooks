@@ -80,7 +80,8 @@ directories are writable by the allocated UID and groups.
    credentials belong in Git.
 3. Establish file readability under the serving runtime's approved UID/group.
    For a different claim, update the recipe PVC name and both platform
-   references together. The recipe does not create or resize a PVC.
+   references together. Serving manifests do not create or resize a PVC; the
+   Janus-specific claim example is separate from the serving recipe.
 4. If the checkpoint is stored in a subdirectory rather than the PVC root,
    adapt the RHOAI `pvc://` model URI and both read-only mount `subPath` values
    to the same directory. Do not rely on external hub-cache symlinks.

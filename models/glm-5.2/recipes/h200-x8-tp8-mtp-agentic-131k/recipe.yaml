@@ -110,8 +110,9 @@ deployment:
       Both platforms require the exact FP8 checkpoint pre-populated in a PVC
       and mounted read-only at /mnt/models. Run the model-ops download Job once
       before serving; keep the PVC across runs to avoid downloading from
-      Hugging Face again. PVC name, storage class, access mode and capacity are
-      deployment-selected; this recipe does not provision a PVC.
+      Hugging Face again. A Janus-specific 1 TiB NFS claim example is in
+      models/glm-5.2/model-ops/glm52-weights-janus.yaml; other environments
+      must provide an equivalent claim.
   manifests:
     - path: manifests/rhoai-3.5/llminferenceservice.yaml
       kind: LLMInferenceService
