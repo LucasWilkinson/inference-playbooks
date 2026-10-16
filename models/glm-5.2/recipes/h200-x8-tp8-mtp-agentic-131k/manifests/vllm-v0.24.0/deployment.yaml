@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - args:
-        - zai-org/GLM-5.2-FP8
+        - /mnt/models
         - --served-model-name=glm-5.2-fp8
         - --kv-cache-dtype=fp8
         - --max-model-len=131072
@@ -35,12 +35,6 @@ spec:
         - |
           vllm serve "$@"
         - --
-        env:
-        - name: HF_TOKEN
-          valueFrom:
-            secretKeyRef:
-              key: HF_TOKEN
-              name: hf-token
         image: docker.io/vllm/vllm-openai:v0.24.0
         livenessProbe:
           failureThreshold: 5
@@ -86,6 +80,9 @@ spec:
           name: tmp
         - mountPath: /dev/shm
           name: dshm
+        - mountPath: /mnt/models
+          name: model-weights
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -100,3 +97,7 @@ spec:
           medium: Memory
           sizeLimit: 16Gi
         name: dshm
+      - name: model-weights
+        persistentVolumeClaim:
+          claimName: glm52-weights
+          readOnly: true

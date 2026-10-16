@@ -1,49 +1,54 @@
-# Model storage by platform
+# Persistent model storage
 
-The standalone [vLLM Deployment](../manifests/vllm-v0.24.0/deployment.yaml)
-passes `zai-org/GLM-5.2-FP8` to vLLM. It downloads the checkpoint at startup
-using the existing `hf-token` Secret and stores its Hugging Face cache in
-pod-local `emptyDir` storage. It does not need a pre-populated weights PVC, but
-it does need Hugging Face access, outbound network access and enough node
-ephemeral storage. A replacement pod downloads the model again.
-
-The [RHOAI service](../manifests/rhoai-3.5/llminferenceservice.yaml) still
-requires a pre-populated PVC. Neither path creates a downloader, PVC, namespace
-or token secret. Both remain day-zero and needs-verification in
-[recipe.yaml](../recipe.yaml). Memory-backed `/dev/shm` is separate from model
+Both the standalone [vLLM Deployment](../manifests/vllm-v0.24.0/deployment.yaml)
+and [RHOAI service](../manifests/rhoai-3.5/llminferenceservice.yaml) mount the
+same existing PVC, `glm52-weights`, read-only at **/mnt/models**. Download the
+checkpoint once with the [model-ops Job](../../../model-ops/download-fp8-pvc.yaml)
+before the first serving run, then keep the PVC between runs. Recreated serving
+pods use the files already on the claim and do not download them from Hugging
+Face. The Job needs the existing `hf-token` Secret (key `HF_TOKEN`); serving
+does not need Hugging Face access. `/dev/shm` remains separate from model
 storage.
 
-## RHOAI PVC example and exact directory layout
+The PVC must be Bound in the target namespace and large enough for the complete
+**zai-org/GLM-5.2-FP8** checkpoint plus preparation headroom. The checkpoint
+files currently total about 756 GB. The Janus lab example requests 2 TiB on
+NFS; other environments should choose storage class, access mode and capacity
+for their own storage. Serving manifests do not create or resize claims. Ensure
+the PVC is writable by the downloader and readable by the serving pod's
+UID/group.
 
-`glm52-weights` is a **concrete example name**, not a mandated infrastructure
-identity. It must be an existing Bound PVC in the namespace selected by the
-deployer. Storage class, access mode and capacity are deployment-specific.
-Single-node use does not inherently require RWX. Capacity must fit the complete
-**zai-org/GLM-5.2-FP8** checkpoint at the exact revision selected for deployment,
-plus preparation headroom. Choose capacity from the actual checkpoint files
-and storage requirements rather than a fixed recipe-wide size.
+The downloader writes the model files directly to the PVC root. That directory
+must contain `config.json`, tokenizer assets, the safetensors index and every
+shard referenced by that index, plus all other files required by the selected
+checkpoint. Do not substitute `THUDM/GLM-5.2` base weights or another
+quantization. Wait for the download Job to complete before launching a serving
+run; do not serve a partial download or an external symlink tree.
 
-The RHOAI example stores the checkpoint directory **at the PVC root**, not inside a
-Hugging Face hub cache tree. That root must contain its `config.json`, tokenizer
-assets, safetensors index and every shard referenced by that index, plus all
-other files required by the selected exact checkpoint revision. Do not substitute
-`THUDM/GLM-5.2` base weights or another quantization. Record the checkpoint,
-resolved immutable revision, file inventory and integrity/completion evidence
-outside mutable serving summaries. Serving must not consume a partial download
-or a symlink tree whose targets lie outside the mounted PVC.
+On Janus, create the claim and populate it once in the namespace used by the
+serving job. In other environments, create an equivalent claim and skip the
+Janus-specific PVC manifest:
 
-For RHOAI, the local JSON6902 overlay mounts this existing PVC read-only at **/mnt/models**.
-The inherited downstream runtime command serves `/mnt/models`, and the model URI
-is `pvc://glm52-weights`. `spec.model.name` is the API alias
-`glm-5.2-fp8`, while `serving.model` retains the quantization-specific checkpoint
-identity. Do not confuse the API alias with the on-disk checkpoint.
+```bash
+# Janus lab; use the same namespace as the serving job.
+export NAMESPACE=kserve-e2e-perf
+oc apply -n "${NAMESPACE}" -f models/glm-5.2/model-ops/glm52-weights-janus.yaml
+oc wait -n "${NAMESPACE}" --for=jsonpath='{.status.phase}'=Bound pvc/glm52-weights --timeout=10m
+oc apply -n "${NAMESPACE}" -f models/glm-5.2/model-ops/download-fp8-pvc.yaml
+oc wait -n "${NAMESPACE}" --for=condition=complete job/download-glm52-weights --timeout=6h
+```
 
-The standalone platform renders from the same `serving` configuration and
-[vLLM override](../platforms/vllm-v0.24.0.yaml). Its
-[runtime patch](../config/vllm-runtime.yaml) keeps the model ID as the vLLM
-argument, sets the API alias and startup budget, and does not add a weights
-PVC. It does not inherit the RHOAI controller command or TLS settings; patches
-are targeted by resource kind.
+The PVC is retained for future runs. A completed Job is also retained, so
+applying it again does not trigger another download. If the Job fails, inspect
+its logs and events; delete and recreate the Job only after correcting the
+cause. Do not delete the PVC during per-run cleanup. To use a different claim,
+keep `deployment.storage.pvc.name` in [recipe.yaml](../recipe.yaml), the RHOAI
+claim in [config/runtime.yaml](../config/runtime.yaml), and the standalone
+claim in [config/vllm-runtime.yaml](../config/vllm-runtime.yaml) synchronized.
+
+For RHOAI, the model URI remains `pvc://glm52-weights`; `spec.model.name` is the
+API alias `glm-5.2-fp8`, while `serving.model` retains the quantization-specific
+checkpoint identity. Do not confuse the API alias with the on-disk checkpoint.
 
 ## Why an explicit RHOAI mount is necessary
 
@@ -67,31 +72,21 @@ directories are writable by the allocated UID and groups.
 
 ## Deployment adaptation and preparation checklist
 
-1. For standalone vLLM, verify the existing `hf-token` Secret can read the
-   gated checkpoint, outbound access to Hugging Face works, and the selected
-   node has enough ephemeral storage for the download and model cache.
-2. For RHOAI, choose a PVC using your environment's approved storage
-   preparation process. Populate the exact revision completely and establish
-   file readability under the runtime's approved UID/group before serving.
-3. Verify the RHOAI claim is Bound, its node attachment/access policy fits this
-   single-node deployment, and its available capacity fits the checkpoint.
-   The generic hardware profile is not PVC inventory.
-4. To select another RHOAI PVC, change `deployment.storage.pvc.name` in
-   [recipe.yaml](../recipe.yaml) and `claimName` in
-   [config/runtime.yaml](../config/runtime.yaml). Storage class and access mode
-   belong to that existing claim; this recipe does not create or resize it.
-5. If the RHOAI checkpoint occupies a subdirectory rather than the PVC root,
-   adapt its `pvc://` model URI and read-only mount `subPath` to the same
-   directory. Do not rely on an external hub-cache symlink. The checked example
-   intentionally uses the root.
-6. Both targets reference the **existing** secret `hf-token`, key
-   `HF_TOKEN`, in the selected namespace. Supply it through your approved secret
-   process or adapt the RHOAI reference in a recipe-local JSON6902 patch and the
-   standalone manifest's secret reference, then regenerate. No credentials
-   belong in Git.
-7. Keep namespace omitted in the manifest and choose it at deployment time.
-   No recipe-owned namespace, ServiceAccount, SCC or PVC creation is implied.
-8. Regenerate after deployment-specific adaptation rather than hand-edit outputs:
+1. Verify the existing `glm52-weights` claim is Bound in the target namespace,
+   has enough capacity, and its attachment/access policy fits the serving
+   deployment. The generic hardware profile is not PVC inventory.
+2. Verify the existing `hf-token` Secret can read the gated checkpoint, then
+   run the model-ops Job and wait for completion before launching serving. No
+   credentials belong in Git.
+3. Establish file readability under the serving runtime's approved UID/group.
+   For a different claim, update the recipe PVC name and both platform
+   references together. The recipe does not create or resize a PVC.
+4. If the checkpoint is stored in a subdirectory rather than the PVC root,
+   adapt the RHOAI `pvc://` model URI and both read-only mount `subPath` values
+   to the same directory. Do not rely on external hub-cache symlinks.
+5. Keep namespace omitted in serving manifests and select it at deployment
+   time. The model-ops Job uses the namespace passed to `oc apply`.
+6. Regenerate after deployment-specific adaptation rather than hand-edit outputs:
 
    ```bash
    python3 tools/validate.py --current --require-converted-raw
@@ -99,8 +94,7 @@ directories are writable by the allocated UID and groups.
    python3 tools/check_manifests.py models/glm-5.2/recipes/h200-x8-tp8-mtp-agentic-131k
    ```
 
-Before deployment, verify Hugging Face access and node ephemeral capacity for
-standalone vLLM, or PVC population and controller presets for RHOAI. Rendering
+Before deployment, verify PVC population and controller presets. Rendering
 does not verify storage, schedulability, GLM/MTP correctness or AgentX
 performance.
 
@@ -128,10 +122,10 @@ controller presets, particularly after upgrades.
   identifies the standalone runtime; it does not inherit RHOAI's shell-prequoted
   speculative-config override. The template passes raw JSON as one argv token.
 - [config/kustomization.yaml](../config/kustomization.yaml) applies each runtime
-  patch only to its matching resource kind. The Deployment patch sets the model
-  startup budget, alias, probes and shared memory, and removes the template's
-  undeclared CPU limit. The pod downloads into ephemeral cache storage; a pod
-  replacement downloads the checkpoint again.
+  patch only to its matching resource kind. The Deployment patch sets the local
+  model path, read-only PVC mount, startup budget, alias, probes and shared
+  memory, removes the unused HF token dependency and the template's undeclared
+  CPU limit.
 - Render after changing inputs. The entire
   [vLLM Deployment](../manifests/vllm-v0.24.0/deployment.yaml) is generated;
   edit recipe inputs and runtime patches rather than the generated manifest.
@@ -140,8 +134,7 @@ controller presets, particularly after upgrades.
   for initial checks or separately reviewed networking for exposure; RHOAI
   routing/security policy does not apply automatically.
 - Its non-root UID and security context must be accepted by the namespace's
-  approved SCC policy, with writable cache/temp mounts. The HF token must be
-  authorized to access the checkpoint.
+  approved SCC policy, with readable weights and writable cache/temp mounts.
   The template's fixed UID is not guaranteed to fit an OpenShift namespace's allocated UID
   range. Adapt security through a reviewed Deployment-targeted patch; no SCC grant is provided here.
 - Rendering and drift checks prove reproducible generation, not upstream model

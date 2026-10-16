@@ -1,11 +1,14 @@
-# Patch only settings not honored by main's vLLM template yet.
-# Image, serving flags, TP, resources and container boilerplate remain generated.
+# Patch the standalone Deployment to use the pre-populated weights PVC and
+# settings not honored by main's vLLM template yet.
 - op: test
   path: /spec/template/spec/containers/0/name
   value: vllm
 - op: test
   path: /spec/template/spec/containers/0/args/0
   value: zai-org/GLM-5.2-FP8
+- op: replace
+  path: /spec/template/spec/containers/0/args/0
+  value: /mnt/models
 - op: add
   path: /spec/progressDeadlineSeconds
   value: 7200
@@ -15,6 +18,11 @@
 - op: replace
   path: /spec/template/spec/containers/0/args/1
   value: --served-model-name=glm-5.2-fp8
+- op: test
+  path: /spec/template/spec/containers/0/env/0/name
+  value: HF_TOKEN
+- op: remove
+  path: /spec/template/spec/containers/0/env
 # Main's template injects an 8-CPU limit even though serving declares no limit.
 # Remove it so the limit cannot be lower than the declared CPU request.
 - op: remove
@@ -34,3 +42,16 @@
 - op: replace
   path: /spec/template/spec/volumes/2/emptyDir/sizeLimit
   value: 16Gi
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    mountPath: /mnt/models
+    name: model-weights
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: model-weights
+    persistentVolumeClaim:
+      claimName: glm52-weights
+      readOnly: true
