@@ -161,9 +161,20 @@ function renderModelCard(model, entry) {
   const icon = node('div', presentation.icon_letter || (model.name || model.id)[0] || '?');
   icon.style.backgroundColor = /^#[a-f0-9]{6}$/i.test(presentation.icon_bg || '') ? presentation.icon_bg : '#4B2E83';
   icon.style.color = '#fff'; icon.style.padding = '18px'; icon.style.borderRadius = '8px';
-  const content = node('div'); content.append(node('h1', model.name || model.id));
+  const hfIdentity = typeof model.metadata.huggingface_id === 'string'
+    ? model.metadata.huggingface_id.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/) : null;
+  const content = node('div'), heading = node('h1');
+  const modelName = model.name || model.id;
+  heading.append(hfIdentity
+    ? sourceLink({ url: `https://huggingface.co/${encodeURIComponent(hfIdentity[1])}/${encodeURIComponent(hfIdentity[2])}` }, modelName)
+    : node('span', modelName));
+  content.append(heading);
   const meta = node('div', null, 'model-meta');
-  meta.append(node('span', `Provider: ${presentation.provider || model.metadata.huggingface_id?.split('/')[0] || 'Unknown'}`));
+  const organization = node('span', 'HF organization: ');
+  organization.append(hfIdentity
+    ? sourceLink({ url: `https://huggingface.co/${encodeURIComponent(hfIdentity[1])}` }, hfIdentity[1])
+    : node('span', 'Unknown'));
+  meta.append(organization);
   if (entry) {
     meta.append(node('span', `Recipe maturity: ${entry.maturity}`));
     if (entry.validation.label) meta.append(node('span', entry.validation.label, 'pill--validated'));
