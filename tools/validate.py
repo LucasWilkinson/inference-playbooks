@@ -14,9 +14,10 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from constraints import load_constraints, validate_recipe_against_constraints
-from recipe_evidence import check_hardware_profiles, load_unique_yaml, load_unique_yaml_all
+from recipe_evidence import check_hardware_profiles, load_unique_yaml
 from engine_versions import baseline_images, engine_errors, load_engine_index, resolve_engine
 from jsonschema.exceptions import ValidationError
+from manifest_policy import load_manifest_documents, report_service_policy_errors, service_errors, validate_recipe_manifest_files
 
 
 SCHEMAS = {
@@ -114,16 +115,16 @@ def validate_raw_manifest_intake(repo: Path, recipe_schema: dict, require_conver
             manifest_count += 1
             try:
                 text = path.read_text()
+                documents = load_manifest_documents(path, text)
                 if path.suffix.lower() == ".json":
-                    documents = [json.loads(text)]
                     if not isinstance(documents[0], dict):
                         raise ValueError("JSON file must contain an object")
-                else:
-                    documents = [document for document in load_unique_yaml_all(text) if document is not None]
             except (OSError, UnicodeError, ValueError, yaml.YAMLError, json.JSONDecodeError) as error:
                 errors.append(f"{path}: cannot parse raw manifest: {error}")
                 continue
-            if not documents or any(not isinstance(document, dict) for document in documents):
+            errors.extend(service_errors(path, documents))
+            nonempty_documents = [document for document in documents if document is not None]
+            if not nonempty_documents or any(not isinstance(document, dict) for document in nonempty_documents):
                 errors.append(f"{path}: raw manifest must contain at least one YAML object document")
         if not manifest_count:
             errors.append(f"{directory}: raw-manifest needs at least one YAML or JSON file")
@@ -554,6 +555,35 @@ def validate_benchmark_run(repo: Path, path: Path, run: dict) -> tuple[list[str]
         elif artifact_uri:
             if not artifact.get("checksum"):
                 errors.append(f"{path}: artifact[{i}] external URI requires a checksum: {artifact_uri}")
+    if run.get('evidence_source') == 'forge-kpis' and result_path and result_path.is_file():
+        # The same offline replay runs in local validation/pre-commit and CI.
+        from normalize_kpis import normalize
+        from forge_model_identity import validate_model_identity
+        import hashlib
+        try:
+            raw_path = path.parent / 'kpis.json'
+            raw = raw_path.read_bytes()
+            checksum = 'sha256:' + hashlib.sha256(raw).hexdigest()
+            forge = run['forge']
+            if checksum != forge['kpis_checksum']:
+                raise ValueError('Forge KPI checksum mismatch')
+            if not any(a.get('path') == 'kpis.json' and a.get('checksum') == checksum
+                       and a.get('type') == 'raw-output' for a in run['artifacts']):
+                raise ValueError('Forge evidence must reference checksummed local kpis.json')
+            document = json.loads(raw)
+            recipe_path = path.parent.parent.parent / 'recipe.yaml'
+            recipe = load_yaml(recipe_path)
+            model = load_yaml(recipe_path.parent.parent.parent / 'model.yaml')
+            validate_model_identity(document, recipe, model)
+            expected = normalize(document, run_id='forge-' + forge['mlflow_benchmark_run_id'],
+                                 deployment_scope=run['deployment_scope'], accelerator_key=profile['accelerator_key'],
+                                 expected_concurrencies=forge.get('expected_concurrencies'))[run['harness']]
+            if json.loads(result_path.read_text()) != expected:
+                raise ValueError('Forge normalized result differs from raw KPI replay')
+            if forge['completeness'] != expected['completeness']:
+                raise ValueError('Forge completeness differs from raw KPI replay')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            errors.append(f'{path}: {error}')
     return errors, result_path
 
 
@@ -647,12 +677,20 @@ def main() -> int:
             models_by_id[mid] = model_data
 
     recipe_ids: dict[str, Path] = {}
-    for path in sorted(repo.glob("models/*/recipes/*/recipe.yaml")):
+    for directory in sorted(repo.glob("models/*/recipes/*")):
+        if not directory.is_dir():
+            continue
+        path = directory / "recipe.yaml"
+        if not path.is_file():
+            errors.extend(validate_recipe_manifest_files(directory, {}))
+            continue
         try:
             recipe = load_yaml(path)
         except (OSError, ValueError, yaml.YAMLError) as error:
             errors.append(f"{path}: cannot load YAML: {error}")
+            errors.extend(validate_recipe_manifest_files(directory, {}))
             continue
+        errors.extend(validate_recipe_manifest_files(directory, recipe))
         document_errors = validate_document(path, recipe, schemas["recipe"], registry)
         errors.extend(document_errors)
         if document_errors:
@@ -742,6 +780,7 @@ def main() -> int:
         elif result.get("run_id") != expected[1].get("run_id"):
             errors.append(f"{path}: run_id does not match its referencing benchmark run")
     if errors:
+        report_service_policy_errors(repo, errors)
         print("\n".join(errors), file=sys.stderr)
         return 1
     print("Validated schemas, references, and hardware-profile corrections.")
