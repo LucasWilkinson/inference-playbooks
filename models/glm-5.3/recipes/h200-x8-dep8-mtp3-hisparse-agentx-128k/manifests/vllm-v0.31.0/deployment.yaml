@@ -99,7 +99,6 @@ spec:
           name: tmp
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534
         seccompProfile:
           type: RuntimeDefault
       volumes:
