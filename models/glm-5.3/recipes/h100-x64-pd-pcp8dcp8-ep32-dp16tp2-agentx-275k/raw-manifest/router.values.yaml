@@ -25,7 +25,7 @@
 # resolves through the GPU events' engine->request key mapping and weights at
 # 0.8 (default kvCacheBackendConfigs).
 #
-# helm upgrade --install canary-dev oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.11.0 -n glm52-canary -f router.values.yaml
+# helm upgrade --install glm53-e2e oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.11.0 -n glm52-canary -f router.values.yaml
 router:
   epp:
     replicas: 1
@@ -115,9 +115,9 @@ router:
           # maxTTFTPenaltyMs 60000 (default 18000): at 25K tok/s the default
           # broke stickiness at ~450K in-flight tokens of imbalance, less
           # than two 275K prompts; 60s is ~1.5M tokens, more than a full
-          # rank at MAX_NUM_SEQS=4. Same values as the approx deployment
-          # (../../../rob-experiments/glm-deepep-pcp) so the A/B isolates
-          # the index.
+          # rank at MAX_NUM_SEQS=4. The submitted approximate alternative uses
+          # a different throughput estimate and EPP build; comparing them does
+          # not isolate the cache index. Align these before a controlled A/B.
           - type: prefix-cache-affinity-filter
             parameters:
               prefixMatchInfoProducerName: precise-prefix-cache-producer

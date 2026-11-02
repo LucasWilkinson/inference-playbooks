@@ -17,9 +17,8 @@
 # Differences vs ../deployment-pcp-offloading:
 #   - The two LWSes are roles of one DisaggregatedSet (same shape as
 #     ../disagg-set-deployment), so the set rolls out as a unit and carries
-#     disaggregatedset.x-k8s.io/revision labels. The LWS names
-#     (glm53-e2e-prefill / glm53-e2e-decode) are unchanged, so the justfile
-#     and the Helm release name glm53-e2e keep working.
+#     disaggregatedset.x-k8s.io/revision labels. Inspect controller-created
+#     LWS names for this set (glm53-e2e-pcp); source baseline names do not apply.
 #   - Prefill publishes KV cache events (--kv-events-config, topic
 #     kv@<pod ip>:8000@zai-org/GLM-5.3) and the EPP replaces
 #     approx-prefix-cache-producer with precise-prefix-cache-producer
@@ -91,12 +90,6 @@ spec:
                           - key: nvidia.com/gpu.product
                             operator: In
                             values: [NVIDIA-H100-80GB-HBM3]
-                          # Same exclusions as ../deployment-pcp-offloading.
-                          - key: kubernetes.io/hostname
-                            operator: NotIn
-                            values:
-                              - rits-roce-z6lst-worker-h100-3-gdr-pvkm2
-                              - rits-roce-z6lst-worker-h100-3-gdr-w58sv
                           # Nodes with the GLM-5.3 weights already on the node-local cache.
                           - key: rits.node-model-cache-enabled
                             operator: In
@@ -104,22 +97,6 @@ spec:
                           - key: llm-d.ai/glm53-cache
                             operator: In
                             values: [ready]
-                  # Prefer nodes whose hostPath jit-cache already has DeepGEMM kernels.
-                  preferredDuringSchedulingIgnoredDuringExecution:
-                    - weight: 100
-                      preference:
-                        matchExpressions:
-                          - key: kubernetes.io/hostname
-                            operator: In
-                            values:
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-bzwn4
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-mpcv9
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-qtd4d
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-g7wzn
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-2l9mr
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-nfpxj
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-gf5ll
-                              - rits-roce-z6lst-worker-h100-3-gdr-mc-6s9lz
               tolerations:
                 - key: nvidia.com/gpu
                   operator: Exists
@@ -146,7 +123,7 @@ spec:
                     capabilities:
                       add: [NET_ADMIN]
                 - name: verify-model-mount
-                  image: busybox:1.36
+                  image: docker.io/library/busybox:1.36
                   imagePullPolicy: IfNotPresent
                   command: [sh, -c]
                   args:
@@ -480,11 +457,6 @@ spec:
                           - key: nvidia.com/gpu.product
                             operator: In
                             values: [NVIDIA-H100-80GB-HBM3]
-                          - key: kubernetes.io/hostname
-                            operator: NotIn
-                            values:
-                              - rits-roce-z6lst-worker-h100-3-gdr-pvkm2
-                              - rits-roce-z6lst-worker-h100-3-gdr-w58sv
                           # Nodes with the GLM-5.3 weights already on the node-local cache.
                           - key: rits.node-model-cache-enabled
                             operator: In
@@ -517,7 +489,7 @@ spec:
                     capabilities:
                       add: [NET_ADMIN]
                 - name: verify-model-mount
-                  image: busybox:1.36
+                  image: docker.io/library/busybox:1.36
                   imagePullPolicy: IfNotPresent
                   command: [sh, -c]
                   args:

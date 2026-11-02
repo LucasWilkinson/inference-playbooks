@@ -32,8 +32,11 @@ always disaggregates, filters prefill by prefix-cache affinity using
 512-token blocks = `--block-size 64` x DCP8), and picks decode by active
 requests.
 
-`router-approx.values.yaml`: A/B alternative using the approximate prefix
-index (`approx-prefix-cache-producer`, LRU sized for GPU + CPU tier).
+`router-approx.values.yaml`: historical alternative using the approximate prefix
+index (`approx-prefix-cache-producer`, LRU sized for GPU + CPU tier). Its EPP
+build, chart version and throughput estimate differ from the default. This is
+not a controlled A/B comparison; align those settings before measuring the
+effect of the index alone.
 
 ## Files
 
@@ -85,8 +88,10 @@ kubectl port-forward -n glm52-canary svc/glm53-e2e-epp 8000:80
 These are specific to the RITS RoCE H100 OpenShift cluster and need to be
 parameterized or removed during conversion:
 
-- Node affinity: `kubernetes.io/hostname` exclusions/preferences, and the
-  `rits.node-model-cache-enabled` / `llm-d.ai/glm53-cache=ready` node labels.
+- Node affinity: `rits.node-model-cache-enabled` / `llm-d.ai/glm53-cache=ready`
+  node labels. Set these only on eligible nodes with the required weights and
+  working RoCE rails. Source-cluster hostname exclusions/preferences were
+  removed; do not label known-unhealthy nodes as eligible.
 - Namespace `glm52-canary`, ServiceAccount `glm-5-2`, PVC name and subPath.
 - `quay.io/dagray/rdma-tools:tiny` init image for the route install.
 - Envoy image override (`docker.io/envoyproxy/envoy:distroless-v1.38.4`) and
@@ -105,6 +110,13 @@ parameterized or removed during conversion:
   must run the same image digest.
 
 ## Changes from the source
+
+- Removed source-cluster hostnames from both roles' scheduling rules.
+- Fully qualified BusyBox images; corrected default deployment commands and
+  documented that the alternate router configuration is not an isolated A/B.
+- The maintainer conversion is an offline draft; see
+  [conversion notes](../guides/conversion.md) for authoritative inputs and
+  unresolved evidence requirements.
 
 - `patches/10-release-weight-page-cache.py` is inlined as
   `vllm-startup-patches.configmap.yaml` (raw-manifest accepts YAML/JSON only);

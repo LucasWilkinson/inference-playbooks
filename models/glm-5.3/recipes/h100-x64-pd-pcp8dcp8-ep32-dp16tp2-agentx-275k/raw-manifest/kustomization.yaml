@@ -14,23 +14,21 @@
 #     publishes kv events and the EPP's precise-prefix-cache-producer
 #     subscribes (see router.values.yaml).
 #
-#   kubectl apply -k glm53-h100-experiments/deployment-pcp-canary
-#   kubectl kustomize glm53-h100-experiments/deployment-pcp-canary   # render only
+# Run from this directory:
+#   kubectl apply -k .
+#   kubectl kustomize .   # render only
 #
 # The EPP (InferencePool + Envoy) is a Helm release, see router.values.yaml:
 #
 #   helm upgrade --install glm53-e2e \
-#     oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.10.0 \
-#     -n glm52-canary -f glm53-h100-experiments/deployment-pcp-canary/router.values.yaml
+#     oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.11.0 \
+#     -n glm52-canary -f router.values.yaml
 #   kubectl port-forward -n glm52-canary svc/glm53-e2e-epp 8000:80
 #
-# The set's LWSes (glm53-e2e-prefill / glm53-e2e-decode, so pods
-# glm53-e2e-prefill-0, glm53-e2e-decode-0, ...) and the Helm release
-# (glm53-e2e -> svc glm53-e2e-epp) use the same names as ../baseline-tp, so
-# ../justfile works unchanged. That also means the two can't run side by side:
-# tear one down before applying the other. The pods carry their own guide label
-# (glm53-pcp-canary), so the pool never selects a stray baseline pod. Takes
-# 8 H100 nodes with llm-d.ai/glm53-cache=ready, same as ../baseline-tp.
+# The DisaggregatedSet is glm53-e2e-pcp; inspect controller-created LWS names
+# rather than assuming names from the source repository's baseline deployment.
+# The Helm release is glm53-e2e. The pool selects glm53-pcp-canary pods.
+# Requires 8 eligible H100 nodes with llm-d.ai/glm53-cache=ready.
 #
 # Needs the DisaggregatedSet controller, the LeaderWorkerSet controller and
 # the Prometheus operator CRDs.
