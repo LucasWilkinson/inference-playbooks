@@ -47,9 +47,7 @@ class Client:
         request = Request(self.uri + path, data=None if body is None else json.dumps(body).encode(),
                           headers={**self.headers, 'Content-Type': 'application/json'})
         with self.opener.open(request, timeout=60) as response:
-            data = response.read(10 * 1024 * 1024 + 1)
-        if len(data) > 10 * 1024 * 1024:
-            raise ValueError('artifact exceeds 10 MiB intake limit')
+            data = response.read()
         return data if raw else json.loads(data)
 
     def run(self, run_id):
@@ -292,7 +290,33 @@ def distributed_serving_values(manifest, pods, checkpoint):
     return revisions.pop(), digests.pop()
 
 
-def execution_values(client, parent_id, repo, expected_revision, pr_number):
+def verify_pr_revision(repo, revision, pr_head):
+    """Accept only an exact commit on the merged PR's history, never another ref."""
+    if any(not isinstance(value, str) or not re.fullmatch('[a-f0-9]{40}', value)
+           for value in (revision, pr_head)):
+        raise ValueError('invalid tested recipe revision or PR head')
+    if revision != pr_head:
+        result = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', revision, pr_head],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            raise ValueError('tested recipe revision is not an ancestor of the merged PR head')
+    return revision
+
+
+def execution_context(client, parent_id):
+    """Read only the recorded recipe context, not the Forge checkout revision."""
+    raw = client.request('/get-artifact?' + urlencode({
+        'run_id': parent_id, 'path': '01__test/000__ci_metadata/fournos_fjob.yaml'}), raw=True)
+    try:
+        env = load_unique_yaml(raw.decode())['spec']['env']
+        if not isinstance(env, dict):
+            raise ValueError('invalid environment')
+        return env
+    except (yaml.YAMLError, ValueError, KeyError, TypeError):
+        raise ValueError('invalid Forge execution YAML') from None
+
+
+def execution_values(client, parent_id, repo, expected_revision, pr_number, context=None):
     """Read existing Forge execution metadata into the existing run contract."""
     def artifact(path):
         return client.request('/get-artifact?' + urlencode({'run_id': parent_id, 'path': path}), raw=True).decode()
@@ -303,8 +327,7 @@ def execution_values(client, parent_id, repo, expected_revision, pr_number):
         except (yaml.YAMLError, ValueError):
             raise ValueError('invalid Forge execution YAML') from None
 
-    fjob = document('01__test/000__ci_metadata/fournos_fjob.yaml')
-    env = fjob['spec']['env']
+    env = execution_context(client, parent_id) if context is None else context
     # Recorded requested/tested recipe context, not an independent checkout
     # attestation and not the Forge checkout's PULL_PULL_SHA.
     revision = env.get('FORGE_FOREIGN_TESTING_PULL_PULL_SHA')
@@ -313,6 +336,23 @@ def execution_values(client, parent_id, repo, expected_revision, pr_number):
     if str(env.get('FORGE_FOREIGN_TESTING_PULL_NUMBER')) != str(pr_number):
         raise ValueError('PR attribution mismatch')
     config = document('01__test/001__inference_playbooks_test_dir/config.yaml')['inference_playbooks']
+    workload_context = {}
+    if '/' in config.get('recipe', ''):
+        from forge_bundle_contract import read_bundle
+        path, recipe, platform, deployment, bundle = read_bundle(repo, config, expected_revision, artifact)
+        relative = str(path.relative_to(repo))
+        profile = load_unique_yaml(checked_path(repo, recipe['hardware_profile']).read_text())
+        workload_context = {'playbooks.forge_revision': bundle['forge_revision'],
+                            'playbooks.workload_selection': json.dumps(config.get('workload'))}
+    else:
+        path, recipe, platform, deployment, relative, profile = legacy_execution_launch(
+            client, parent_id, repo, expected_revision, config, document)
+    return {**execution_runtime_values(client, parent_id, recipe, platform, deployment, relative,
+                                      profile, revision, pr_number, artifact, document), **workload_context}
+
+
+def legacy_execution_launch(client, parent_id, repo, expected_revision, config, document):
+    """Historical Forge launch files and transformations, separate from bundle v1."""
     manifest_path = config['manifest_path']
     match = re.fullmatch(r'(models/[^/]+/recipes/[^/]+)/manifests/[^/]+/[^/]+\.yaml', manifest_path)
     if not match:
@@ -349,6 +389,12 @@ def execution_values(client, parent_id, repo, expected_revision, pr_number):
     if (kind == 'LLMInferenceService') != (platform['stack'] == 'rhoai'):
         raise ValueError('execution serving kind disagrees with selected platform')
     validate_launch(repo, manifest_path, expected_revision, deployment)
+    return path, recipe, platform, deployment, relative, profile
+
+
+def execution_runtime_values(client, parent_id, recipe, platform, deployment, relative,
+                             profile, revision, pr_number, artifact, document):
+    kind = deployment['kind']
     log = artifact('01__test/run.log')
     if kind != 'Deployment':
         capture_name = 'lws' if kind == 'LeaderWorkerSet' else 'llmisvc'
@@ -417,10 +463,8 @@ def tested_inputs(repo, relative, expected_revision, require_clean=None):
     tested = load_unique_yaml(subprocess.run(['git', '-C', str(repo), 'show', f'{expected_revision}:{relative}'],
                               check=True, capture_output=True, text=True).stdout)
     current = dict(recipe)
-    tested_references = tested.get('benchmark_runs', [])
-    current_references = current.get('benchmark_runs', [])
-    if any(reference not in current_references for reference in tested_references):
-        raise ValueError('merged recipe removed tested benchmark references')
+    # Evidence references are outputs, not deployment inputs. Replacement can
+    # remove earlier runs that were still indexed when this execution was tested.
     for data in (tested, current):
         data.pop('benchmark_runs', None)
     if tested != current:
@@ -432,6 +476,10 @@ def tested_inputs(repo, relative, expected_revision, require_clean=None):
     inputs.extend(str((path.parent / p['overrides']).relative_to(repo)) for p in recipe['platforms'])
     inputs.extend(str((path.parent / p['pinned_manifest']).relative_to(repo))
                   for p in recipe['platforms'] if p.get('pinned_manifest'))
+    # Forge bundle v1 launches the entire immediate platform directory. Check
+    # inventory additions/removals too, including on metadata-only receipt hits.
+    inputs.extend(str((path.parent / 'manifests' / f'{p["stack"]}-{p["version"]}').relative_to(repo))
+                  for p in recipe['platforms'])
     inputs.extend(str(checked_path(repo, str(path.parent.relative_to(repo) / p['config'])).relative_to(repo))
                   for p in recipe['platforms'] if p.get('config'))
     if require_clean is not None:
@@ -469,7 +517,15 @@ def append_reference(text, reference):
     recipe = load_unique_yaml(text)
     if reference in recipe.get('benchmark_runs', []):
         return text
-    expected = {**recipe, 'benchmark_runs': [*recipe.get('benchmark_runs', []), reference]}
+    return set_references(text, [*recipe.get('benchmark_runs', []), reference])
+
+
+def set_references(text, references):
+    """Replace only the evidence index, preserving unrelated recipe text and values."""
+    recipe = load_unique_yaml(text)
+    if recipe.get('benchmark_runs') == references:
+        return text
+    expected = {**recipe, 'benchmark_runs': references}
     block = yaml.safe_dump({'benchmark_runs': expected['benchmark_runs']}, sort_keys=False)
     if 'benchmark_runs' in recipe:
         pattern = r'(?m)^benchmark_runs:[^\n]*(?:\n(?:[ \t]+[^\n]*|-[ \t]+[^\n]*|[ \t]*))*(?:\n|$)'
@@ -485,7 +541,7 @@ def append_reference(text, reference):
 
 
 def import_parent(client, repo, parent_id, expected_revision, pr_number, comment_id=None,
-                  *, require_parent=False, admissions=None):
+                  *, require_parent=False, admissions=None, pr_head_revision=None):
     parent = client.run(parent_id)
     actual_parent = tags(parent).get('mlflow.parentRunId')
     if actual_parent:
@@ -498,11 +554,22 @@ def import_parent(client, repo, parent_id, expected_revision, pr_number, comment
     if require_parent:
         if parent['info']['run_id'] != parent_id:
             raise ValueError('selected execution identity mismatch')
-        if tags(parent).get('playbooks.tested_revision', expected_revision) != expected_revision:
+        if pr_head_revision is None and tags(parent).get('playbooks.tested_revision', expected_revision) != expected_revision:
             raise ValueError('selected execution tested revision mismatch')
     parent_artifact = client.kpis(parent_id)
     current_parent = parent_artifact is not None and re.fullmatch(
         r'01__test/\d+__postprocessing/kpis/kpis.json', parent_artifact[0])
+    context = None
+    if pr_head_revision is not None:
+        if not require_parent:
+            raise ValueError('historical PR revision selection requires a primary parent run')
+        revision = tags(parent).get('playbooks.tested_revision', expected_revision)
+        if current_parent and 'playbooks.tested_revision' not in tags(parent):
+            context = execution_context(client, parent_id)
+            revision = context.get('FORGE_FOREIGN_TESTING_PULL_PULL_SHA')
+        # Ancestry authorizes selection only. attribution/tested_inputs and
+        # validate_launch still require the merged deployment to match this SHA.
+        expected_revision = verify_pr_revision(repo, revision, pr_head_revision)
     candidates = [parent] if current_parent else [parent, *client.children(parent)]
     if require_parent and any(run['info']['status'] not in {'FINISHED', 'FAILED', 'KILLED'}
                               for run in candidates):
@@ -519,10 +586,10 @@ def import_parent(client, repo, parent_id, expected_revision, pr_number, comment
         artifact_count += 1
         values = {**tags(parent), **tags(child)}
         manifest_bound = False
-        required = ('recipe_path', 'tested_revision', 'hardware_profile', 'hardware_profile_revision',
-                    'model_revision', 'image_digest', 'platform_stack', 'platform_version', 'pr_number', 'command')
-        if current_parent and any(not values.get('playbooks.' + key) for key in required):
-            recorded = execution_values(client, parent_id, repo, expected_revision, pr_number)
+        # Current executions have recorded launch evidence. Even complete tags
+        # must agree with it; tags cannot bypass the versioned bundle contract.
+        if current_parent:
+            recorded = execution_values(client, parent_id, repo, expected_revision, pr_number, context)
             if any(key in values and values[key] != value for key, value in recorded.items()):
                 raise ValueError('Forge attribution tags disagree with recorded execution')
             values = {**values, **recorded}
@@ -531,6 +598,17 @@ def import_parent(client, repo, parent_id, expected_revision, pr_number, comment
         artifact_path, raw = artifact
         document = json.loads(raw)
         safe_artifact(document)
+        expectation_snapshot = None
+        if manifest_bound and values.get('playbooks.forge_revision'):
+            from forge_workload_contract import workload_expectations
+            expectation_snapshot, expected = workload_expectations(
+                client, parent_id, values['playbooks.forge_revision'],
+                json.loads(values['playbooks.workload_selection']), document)
+            if (values.get('playbooks.expected_concurrencies') and
+                    json.loads(values['playbooks.expected_concurrencies']) != expected):
+                raise ValueError('Forge expected concurrency tags disagree with execution workloads')
+            values['playbooks.expected_concurrencies'] = json.dumps(expected, sort_keys=True)
+            safe_artifact(expectation_snapshot)
         model = load_unique_yaml((path.parent.parent.parent / 'model.yaml').read_text())
         validate_model_identity(document, recipe, model)
         for test in document['tests']:
@@ -569,7 +647,10 @@ def import_parent(client, repo, parent_id, expected_revision, pr_number, comment
                                    'image_digest': values['playbooks.image_digest'], 'platform': platform},
                    'workload': {'tests': [t.get('labels', {}) for t in document['tests']
                                          if t.get('labels', {}).get('benchmark_tool') == harness]},
-                   'artifacts': [{'type': 'raw-output', 'path': 'kpis.json', 'checksum': checksum}]}
+                    'artifacts': [{'type': 'raw-output', 'path': 'kpis.json', 'checksum': checksum}]}
+            if expectation_snapshot is not None:
+                run['workload']['expectations'] = expectation_snapshot
+                run['artifacts'].append({'type': 'profile-snapshot', **expectation_snapshot['profile_source']})
             directory = checked_path(repo, str(path.parent.relative_to(repo) / 'results' / result['run_id']))
             files = {'result.json': json.dumps(result, indent=2, allow_nan=False) + '\n',
                      'run.yaml': yaml.safe_dump(run, sort_keys=False), 'kpis.json': raw.decode()}
@@ -637,7 +718,10 @@ def main():
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--pr-number', type=int, required=True)
     parser.add_argument('--comment-id', type=int)
-    parser.add_argument('--tested-revision', required=True)
+    parser.add_argument('--tested-revision', required=True,
+                        help='exact recipe SHA recorded by Forge, not the later import/merge commit')
+    parser.add_argument('--require-parent', action='store_true',
+                        help='require a successful primary run and generate an admission receipt')
     parser.add_argument('--repo', type=Path, default=Path.cwd())
     parser.add_argument('--tracking-uri', default=os.environ.get('MLFLOW_TRACKING_URI'))
     parser.add_argument('--workspace', default=os.environ.get('MLFLOW_WORKSPACE', 'forge-sandbox'))
@@ -646,7 +730,8 @@ def main():
     try:
         client = Client(args.tracking_uri, args.workspace, os.environ['MLFLOW_USERNAME'],
                         os.environ['MLFLOW_PASSWORD'], args.insecure)
-        import_parent(client, args.repo.resolve(), args.run_id, args.tested_revision, args.pr_number, args.comment_id)
+        import_parent(client, args.repo.resolve(), args.run_id, args.tested_revision, args.pr_number,
+                      args.comment_id, require_parent=args.require_parent)
     except Exception as error:
         print(f'Forge intake rejected: {type(error).__name__}: {error}', file=sys.stderr)
         return 1

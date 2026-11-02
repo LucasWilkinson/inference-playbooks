@@ -18,6 +18,7 @@ from recipe_evidence import check_hardware_profiles, load_unique_yaml
 from engine_versions import baseline_images, engine_errors, load_engine_index, resolve_engine
 from jsonschema.exceptions import ValidationError
 from manifest_policy import load_manifest_documents, report_service_policy_errors, service_errors, validate_recipe_manifest_files
+from file_flow import introduced_file_warnings, report_file_warning
 
 
 SCHEMAS = {
@@ -555,6 +556,13 @@ def validate_benchmark_run(repo: Path, path: Path, run: dict) -> tuple[list[str]
         elif artifact_uri:
             if not artifact.get("checksum"):
                 errors.append(f"{path}: artifact[{i}] external URI requires a checksum: {artifact_uri}")
+    if run.get('evidence_source') == 'contributor-forge' and result_path and result_path.is_file():
+        from import_contributor import replay_run
+        import subprocess
+        try:
+            replay_run(repo, path, run)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+            errors.append(f'{path}: contributor evidence replay failed: {error}')
     if run.get('evidence_source') == 'forge-kpis' and result_path and result_path.is_file():
         # The same offline replay runs in local validation/pre-commit and CI.
         from normalize_kpis import normalize
@@ -575,6 +583,13 @@ def validate_benchmark_run(repo: Path, path: Path, run: dict) -> tuple[list[str]
             recipe = load_yaml(recipe_path)
             model = load_yaml(recipe_path.parent.parent.parent / 'model.yaml')
             validate_model_identity(document, recipe, model)
+            snapshot = run.get('workload', {}).get('expectations')
+            if snapshot is not None:
+                from forge_workload_contract import replay_expectations
+                if replay_expectations(snapshot, document) != forge.get('expected_concurrencies'):
+                    raise ValueError('Forge expected concurrencies differ from workload replay')
+                if {'type': 'profile-snapshot', **snapshot['profile_source']} not in run['artifacts']:
+                    raise ValueError('Forge workload snapshot needs its checksummed profile source')
             expected = normalize(document, run_id='forge-' + forge['mlflow_benchmark_run_id'],
                                  deployment_scope=run['deployment_scope'], accelerator_key=profile['accelerator_key'],
                                  expected_concurrencies=forge.get('expected_concurrencies'))[run['harness']]
@@ -615,6 +630,8 @@ def main() -> int:
     if not arguments.current:
         base = arguments.base or "HEAD"
         head = arguments.head or "HEAD"
+        for path, message in introduced_file_warnings(repo, base, head, arguments.cached):
+            report_file_warning(path, message)
         errors.extend(
             [] if check_hardware_profiles(repo, base, head, arguments.cached) == 0
             else ["hardware profile correction validation failed"]

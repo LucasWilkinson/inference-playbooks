@@ -20,6 +20,9 @@ BUILD = {'source_sha': 'a' * 40, 'dirty': False}
 
 @pytest.fixture
 def repo(tmp_path):
+    # Contributor evidence replays its tested Git snapshot. Keep that history
+    # while copying current inputs so tests also exercise uncommitted changes.
+    subprocess.run(['git', 'clone', '--quiet', '--shared', '--no-checkout', str(REPO), str(tmp_path)], check=True)
     for name in ('models', 'schema', 'templates', 'hardware-profiles', 'engine-versions'):
         shutil.copytree(REPO / name, tmp_path / name)
     return tmp_path
@@ -38,6 +41,9 @@ def clone_recipe(repo, name):
     destination = original.parent.parent / name
     shutil.copytree(original.parent, destination)
     recipe = yaml.safe_load(original.read_text())
+    # Synthetic identities must not inherit the source recipe's measured runs.
+    recipe.pop('benchmark_runs', None)
+    recipe['maturity'] = 'day-zero'
     recipe['recipe_id'] = name
     path = destination / 'recipe.yaml'
     path.write_text(yaml.safe_dump(recipe))
@@ -79,6 +85,8 @@ def test_quantization_is_explicit_not_inferred_from_checkpoint(repo, quantizatio
     path = gemma_path(repo)
     recipe = yaml.safe_load(path.read_text())
     recipe['serving']['model'] = 'synthetic/checkpoint-FP8'
+    recipe.pop('benchmark_runs', None)
+    recipe['maturity'] = 'day-zero'
     if quantization:
         recipe['quantization'] = quantization
     else:
@@ -127,6 +135,7 @@ def test_platform_versions_and_colliding_filter_dimensions(repo):
 
 
 def test_profile_identity_is_not_erased_by_accelerator_group(repo):
+    original_id = yaml.safe_load(gemma_path(repo).read_text())['recipe_id']
     path, recipe = clone_recipe(repo, 'synthetic-other-profile')
     profile = yaml.safe_load((repo / recipe['hardware_profile']).read_text())
     profile['profile_id'] = 'synthetic-profile'
@@ -135,7 +144,7 @@ def test_profile_identity_is_not_erased_by_accelerator_group(repo):
     recipe['hardware_profile'] = 'hardware-profiles/synthetic-profile.yaml'
     path.write_text(yaml.safe_dump(recipe))
     render_recipe(repo, path)
-    entries = [entry for entry in catalog(repo)['entries'] if entry['model_id'] == 'gemma-4']
+    entries = [entry for entry in catalog(repo)['entries'] if entry['recipe_id'] in (original_id, recipe['recipe_id'])]
     assert len({entry['hardware']['accelerator_key'] for entry in entries}) == 1
     assert len({entry['hardware']['path'] for entry in entries}) == 2
 
