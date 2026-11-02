@@ -1,5 +1,54 @@
 # Schema changelog
 
+## Actionable reader quickstarts
+
+- Optional `quickstart[].commands` holds a copyable command block and
+  `quickstart[].expected` describes the result to check before continuing.
+- Existing `step` / `detail` notes remain valid. Reader views display commands
+  as inert text; they never execute shell commands or render source HTML.
+
+## Forge base and served model identity
+
+- Results optionally retain explicit `model_name`, `served_model`, and
+  `quantization` labels in `model_identity` when the served-model contract is
+  present. Fields are nonempty strings; absent labels are not synthesized.
+- Intake and offline replay validate the base against `model.yaml`, the served
+  checkpoint against `recipe.serving.model` (never a request alias), and any
+  quantization against an exact checkpoint/name declaration.
+- Historical exact-checkpoint labels retain their normalized result shape;
+  original labels remain in run `workload.tests`. Legacy unlabeled tests retain
+  their existing behavior, but base-only labels cannot identify a different
+  served checkpoint. Raw evidence and admission receipts are unchanged.
+
+## Forge declared model revisions
+
+- Forge run `environment.model_revision` accepts nonempty declared identifiers
+  without whitespace or control characters: `main`, tags, branches, and existing
+  40/64-character hashes. Intake applies the shared artifact privacy guard.
+- The attribution tag remains required and is stored exactly as supplied; Forge
+  supplies `main` when using the default model revision. No schema version or
+  stored field changes. Tested recipe SHA and runtime image digest rules remain
+  unchanged.
+
+## Forge-backed benchmark evidence (run v2)
+
+- Benchmark runs retain v1 compatibility and add v2 `evidence_source` with
+  conditional Forge provenance, immutable revision/digest, checksummed raw KPIs,
+  and explicit smoke/partial/full-sweep completeness.
+- Results add the v2 concurrency `sweep` contract with null latency percentiles,
+  `harness`, `completeness`, and `reference_concurrency`. Unknown KPIs remain in
+  raw artifacts; local and CI validation replay Forge normalization and reject
+  checksum/result drift.
+
+## Add `contributed` maturity level
+
+- `maturity` enum now accepts four values:
+  `day-zero`, `contributed`, `validated`, `production`.
+- `contributed` marks recipes provided by other Red Hat engineers that have
+  been reviewed but not independently tested on our infrastructure.
+- Same schema enforcement as `day-zero`: `benchmark_runs` and `image` are
+  not required. `validated` and `production` still require both.
+
 ## Benchmark artifact external storage
 
 ### Structured artifacts
@@ -148,3 +197,12 @@
 - Benchmark runs record the hardware-profile revision known when they ran.
 - Benchmark runs must reference their normalized result; result run IDs
   resolve to exactly one run record.
+## Engine metadata foundation
+
+- Added optional image-bound `serving.engine` and platform override `engine`.
+- Added `image_usage` classification: custom images require an explanatory note.
+- Added one provenance-tracked CUDA/ROCm/CPU release index for contributor-identified
+  default RHOAI runtimes, covering patch and EA releases. Image references are optional;
+  a recipe image digest is not required for engine resolution.
+- New recipes require image identification and resolved metadata during Git-diff validation;
+  existing recipes remain compatible with unknown engine versions.

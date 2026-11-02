@@ -16,13 +16,19 @@ Create a directory under the target model and open a PR:
 models/<model-id>/recipes/<recipe-id>/
   raw-manifest/
     deployment.yaml          # your working K8s manifest(s)
-    service.yaml             # optional supporting manifests
     README.md                # optional notes
 ```
 
 Use the same `<recipe-id>` convention as full recipes (e.g.,
 `h200-x8-tp8-aggregated-8k1k`). If unsure, use a descriptive name and
 a maintainer will adjust it.
+
+Do not submit Kubernetes `Service` objects. Use operator-managed networking;
+Services created by controllers at runtime are not submitted artifacts. This
+policy applies to raw intake (including preserved submissions), `config/`,
+pinned manifests, and generated `manifests/`, including multi-document bundles
+and Kubernetes `List.items`, regardless of filename. Typed `ServiceList`
+documents are also prohibited, including empty lists.
 
 ### Required information
 
@@ -38,7 +44,8 @@ Include the following in your PR description or in
   (e.g., `guidellm-8k1k`, `aiperf-agentx-128k`)
 - **Deployment pattern**: parallelism mode (TP, PP, TP+PP, DP) and node
   scope (single-node or multi-node)
-- **Container image**: fully qualified image reference
+- **Container image**: fully qualified image reference; explicitly identify custom
+  images and include a note explaining their use
 - **Known prerequisites**: secrets, PVCs, operators, or cluster
   configuration needed to deploy
 
@@ -51,6 +58,7 @@ CI validates raw-manifest submissions for:
 
 - YAML/JSON syntax (no parse errors)
 - No duplicate keys in YAML documents
+- No author-supplied `Service` objects (YAML, YML, or JSON)
 - Directory is under `models/<model-id>/recipes/<recipe-id>/raw-manifest/`
 
 CI does **not** require `recipe.yaml` or schema validation for raw-only
@@ -168,6 +176,18 @@ Create `platforms/vllm-v0.24.0.yaml` (empty `{}` if no overrides needed).
 Override merge: image/resources/router replace, env appends, args merge
 by flag.
 
+New recipe/platform images must declare `serving.image_usage` (or platform
+override `image_usage`) as `default` or `custom`. A custom image requires a
+non-empty `note` and an image-bound `engine` version declaration. A default
+RHOAI runtime declares its variant (`cuda`, `rocm`, or `cpu`) and uses the exact
+release mapping from `engine-versions/index.yaml`. Other default variants and
+standalone vLLM stacks need an explicit engine declaration. Recipe image tags
+are accepted; a digest is not required for this resolution. Replacing an image
+in an override requires fresh identification and, for a custom image, a fresh
+note and engine declaration. See [engine-version metadata](docs/engine-versions.md)
+for examples and provenance requirements. Benchmark digest requirements are
+unchanged.
+
 No `config/` directory needed. Templates handle Kubernetes boilerplate
 (security context, probes, labels, GPU resources, shared memory).
 
@@ -212,7 +232,11 @@ layout. The renderer generates manifests from the serving block.
 
 Put harness inputs and trace provenance in `benchmarks/`, commit
 `results/<run-id>/run.yaml` and `result.json`. Link from `benchmark_runs`.
-Use `maturity: day-zero` if no benchmark run is available.
+Use `maturity: day-zero` for initial configs with minimal confidence, or
+`maturity: contributed` for reviewed recipes provided by other Red Hat
+engineers that have not been independently tested on our infrastructure.
+`validated` and `production` require `benchmark_runs` and a top-level
+`image` lifecycle block.
 
 Benchmark artifacts can be stored locally (`path`) or externally
 (`uri` with `sha256:` checksum). Supported external protocols: `s3://`,
