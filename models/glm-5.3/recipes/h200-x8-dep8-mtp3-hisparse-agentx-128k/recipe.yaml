@@ -47,6 +47,8 @@ serving:
       value: /tmp
     - name: HF_HOME
       value: /home/nobody/.cache/huggingface
+    - name: VLLM_ENGINE_READY_TIMEOUT_S
+      value: "2800"
   port: 8000
   config_overrides: true
   args:
@@ -110,6 +112,10 @@ serving:
 
 deployment:
   scope: single-node
+  storage:
+    type: pvc
+    pvc:
+      name: model-pvc
   status:
     state: verified
     date: "2026-10-09"

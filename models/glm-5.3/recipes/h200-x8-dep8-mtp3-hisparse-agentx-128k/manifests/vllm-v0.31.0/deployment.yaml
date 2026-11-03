@@ -51,6 +51,8 @@ spec:
           value: /tmp
         - name: HF_HOME
           value: /home/nobody/.cache/huggingface
+        - name: VLLM_ENGINE_READY_TIMEOUT_S
+          value: "2800"
         image: docker.io/vllm/vllm-openai:v0.31.0
         livenessProbe:
           failureThreshold: 5
@@ -106,7 +108,8 @@ spec:
           medium: Memory
           sizeLimit: 192Gi
         name: dshm
-      - emptyDir: {}
-        name: hf-cache
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: model-pvc
       - emptyDir: {}
         name: tmp
