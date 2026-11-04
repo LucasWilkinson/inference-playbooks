@@ -48,7 +48,7 @@ serving:
     - name: HF_HOME
       value: /home/nobody/.cache/huggingface
     - name: VLLM_ENGINE_READY_TIMEOUT_S
-      value: "2800"
+      value: "1800"
   port: 8000
   config_overrides: true
   args:

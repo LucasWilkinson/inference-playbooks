@@ -6,6 +6,7 @@ metadata:
     app.kubernetes.io/name: glm-5-3-dep8-mtp3-hisparse
   name: glm-5-3-dep8-mtp3-hisparse
 spec:
+  progressDeadlineSeconds: 1800
   replicas: 1
   selector:
     matchLabels:
@@ -52,7 +53,7 @@ spec:
         - name: HF_HOME
           value: /home/nobody/.cache/huggingface
         - name: VLLM_ENGINE_READY_TIMEOUT_S
-          value: "2800"
+          value: "1800"
         image: docker.io/vllm/vllm-openai:v0.31.0
         livenessProbe:
           failureThreshold: 5

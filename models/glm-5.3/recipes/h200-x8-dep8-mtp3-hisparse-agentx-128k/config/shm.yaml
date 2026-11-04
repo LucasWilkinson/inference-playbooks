@@ -5,6 +5,7 @@ kind: Deployment
 metadata:
   name: glm-5-3-dep8-mtp3-hisparse
 spec:
+  progressDeadlineSeconds: 1800
   template:
     spec:
       containers:
