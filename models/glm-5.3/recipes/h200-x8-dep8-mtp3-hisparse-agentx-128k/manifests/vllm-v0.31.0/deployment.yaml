@@ -31,7 +31,7 @@ spec:
         - --kv-transfer-config={"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":48}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":17179869184}}]}}
         - --max-model-len=142000
         - --max-num-seqs=64
-        - --gpu-memory-utilization=0.97
+        - --gpu-memory-utilization=0.95
         - --enable-auto-tool-choice
         - --tool-call-parser=glm47
         - --reasoning-parser=glm45

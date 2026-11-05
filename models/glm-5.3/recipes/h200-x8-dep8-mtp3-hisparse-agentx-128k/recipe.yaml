@@ -95,7 +95,7 @@ serving:
       required: true
       why: Per rank.
     - flag: --gpu-memory-utilization
-      value: "0.97"
+      value: "0.95"
       required: true
       why: CUDA graphs come out of this budget.
     - flag: --enable-auto-tool-choice
