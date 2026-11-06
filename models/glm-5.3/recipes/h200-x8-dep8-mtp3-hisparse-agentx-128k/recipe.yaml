@@ -122,3 +122,6 @@ deployment:
     method: Deployed manifests/vllm-v0.31.0/deployment.yaml with the stock image on one H200 node (weights from a PVC); 13.67 GiB KV per rank, gsm8k 500 5-shot 0.930.
 
 notes: guides/notes.yaml
+benchmark_runs:
+- results/forge-ec1618e0f96e4719a2af4e9b23341ebe-guidellm/run.yaml
+- results/forge-ec1618e0f96e4719a2af4e9b23341ebe-aiperf/run.yaml
